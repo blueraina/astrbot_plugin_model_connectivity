@@ -1,0 +1,176 @@
+{
+  "dashboard_title": {
+    "description": "状态图标题",
+    "type": "string",
+    "default": "模型连通性",
+    "hint": "显示在图片左上角的大标题。"
+  },
+  "timeout_seconds": {
+    "description": "单个模型探测超时秒数",
+    "type": "float",
+    "default": 30.0,
+    "hint": "每个模型调用 text_chat 的最长等待时间。"
+  },
+  "model_list_timeout_seconds": {
+    "description": "获取模型列表超时秒数",
+    "type": "float",
+    "default": 20.0,
+    "hint": "仅在 detect_enabled_models_only 关闭时生效；调用 Provider.get_models() 的最长等待时间，失败时会回退到当前模型。"
+  },
+  "render_timeout_seconds": {
+    "description": "图片渲染超时秒数",
+    "type": "float",
+    "default": 60.0,
+    "hint": "html_render 生成状态图的最长等待时间。"
+  },
+  "image_scale": {
+    "description": "图片清晰度倍率",
+    "type": "float",
+    "default": 2.0,
+    "hint": "本地渲染 PNG 的输出倍率，1-3；2 表示输出 3000px 宽图片，清晰度更高但文件更大。"
+  },
+  "theme_mode": {
+    "description": "图片主题模式",
+    "type": "string",
+    "default": "auto",
+    "hint": "auto 按时间自动切换；dark 固定夜间模式；light 固定白天模式。"
+  },
+  "day_mode_start_hour": {
+    "description": "白天模式开始小时",
+    "type": "int",
+    "default": 8,
+    "hint": "theme_mode 为 auto 时生效，取值 0-23。"
+  },
+  "day_mode_end_hour": {
+    "description": "白天模式结束小时",
+    "type": "int",
+    "default": 18,
+    "hint": "theme_mode 为 auto 时生效，取值 0-23；例如 8 到 18 表示 08:00-18:00 使用白天模式。"
+  },
+  "render_backend": {
+    "description": "图片渲染方式",
+    "type": "string",
+    "default": "local",
+    "hint": "local 表示插件本地生成 PNG，不依赖远端 t2i；remote 表示使用 AstrBot 的 html_render；auto 表示先本地后远端。"
+  },
+  "fallback_to_remote_render": {
+    "description": "本地渲染失败时尝试远端转图",
+    "type": "bool",
+    "default": true,
+    "hint": "开启后本地 PNG 渲染失败会继续尝试 AstrBot 自带 html_render。"
+  },
+  "detect_enabled_models_only": {
+    "description": "只检测 WebUI 已打开的模型",
+    "type": "bool",
+    "default": true,
+    "hint": "开启后只检测 WebUI 中开关为打开的已配置模型；关闭后会调用 Provider.get_models() 检测 Provider 暴露的模型列表。"
+  },
+  "skip_models": {
+    "description": "跳过的模型",
+    "type": "string",
+    "default": "",
+    "hint": "填写需要排除检测的模型名，多个值可用英文逗号或换行分隔。支持完整值如 openai_1/gpt-5.4，也支持只填模型名如 gpt-5.4。可执行 /modelskiprefresh 查看当前候选。"
+  },
+  "auto_check_interval_min_hours": {
+    "description": "定时自动检测最小间隔小时",
+    "type": "float",
+    "default": 0.0,
+    "hint": "0 表示关闭自动检测；大于 0 时插件会在最小/最大间隔之间随机等待后检测一轮。"
+  },
+  "auto_check_interval_max_hours": {
+    "description": "定时自动检测最大间隔小时",
+    "type": "float",
+    "default": 0.0,
+    "hint": "需大于 0 才会开启自动检测；例如最小 2、最大 5 表示每轮检测间隔随机为 2-5 小时。"
+  },
+  "auto_check_run_on_start": {
+    "description": "启动后立即自动检测一次",
+    "type": "bool",
+    "default": false,
+    "hint": "开启后插件加载时会先自动检测一轮，然后再按最小/最大间隔随机等待下一轮。"
+  },
+  "auto_status_send_interval_hours": {
+    "description": "定时发送最新状态图间隔小时",
+    "type": "float",
+    "default": 0.0,
+    "hint": "0 表示关闭；大于 0 时每隔 xx 小时发送一次最近状态图，不会触发新的模型检测。"
+  },
+  "auto_status_remember_command_session": {
+    "description": "自动记住命令会话作为发送目标",
+    "type": "bool",
+    "default": true,
+    "hint": "开启后，在某个群或私聊执行 /modeltest、/modelstatus 后，插件会记住该会话；定时状态图会发送到这些会话。"
+  },
+  "concurrency": {
+    "description": "全局最大并发探测数",
+    "type": "int",
+    "default": 3,
+    "hint": "所有 Provider 的所有模型共同共享这个上限，即全局最多同时检测 m 个模型。"
+  },
+  "provider_concurrency": {
+    "description": "单个 Provider 最大并发探测数",
+    "type": "int",
+    "default": 1,
+    "hint": "同一个 Provider 内最多同时检测 n 个模型。实际并发也会受到全局 concurrency 限制。"
+  },
+  "max_models_per_provider": {
+    "description": "每个 Provider 最多检测模型数",
+    "type": "int",
+    "default": 0,
+    "hint": "0 表示不限制。仅在 detect_enabled_models_only 关闭时生效。"
+  },
+  "slow_threshold_ms": {
+    "description": "慢响应阈值毫秒",
+    "type": "int",
+    "default": 8000,
+    "hint": "超过该耗时但调用成功时会标记为“较慢”。"
+  },
+  "probe_prompt": {
+    "description": "探测提示词",
+    "type": "string",
+    "default": "只回复 OK 两个字母。",
+    "hint": "发送给每个模型的用户消息。"
+  },
+  "probe_system_prompt": {
+    "description": "探测系统提示词",
+    "type": "string",
+    "default": "你是一个模型连通性探针。请只回复 OK，不要解释。",
+    "hint": "发送给每个模型的 system prompt。"
+  },
+  "enable_history": {
+    "description": "启用历史条",
+    "type": "bool",
+    "default": true,
+    "hint": "开启后会使用 AstrBot 插件 KV 存储记录最近检测结果。"
+  },
+  "show_curve_chart": {
+    "description": "显示延迟背景曲线",
+    "type": "bool",
+    "default": true,
+    "hint": "开启后会在面板下方绘制近期的延迟折线图"
+  },
+  "stats_window_days": {
+    "description": "统计窗口天数",
+    "type": "int",
+    "default": 7,
+    "hint": "用于统计成功次数/总测试次数和可用性的时间窗口，默认一周。"
+  },
+  "history_size": {
+    "description": "历史条长度",
+    "type": "int",
+    "default": 30,
+    "hint": "每个模型保留最近多少次检测结果。"
+  },
+  "max_history_records": {
+    "description": "每个模型最多保留历史记录数",
+    "type": "int",
+    "default": 500,
+    "hint": "用于周成功次数统计的原始历史记录保留上限。"
+  },
+  "show_error_detail": {
+    "description": "在图片中显示错误详情",
+    "type": "bool",
+    "default": true,
+    "hint": "关闭后仅显示错误状态，不展示异常文本。"
+  }
+}
