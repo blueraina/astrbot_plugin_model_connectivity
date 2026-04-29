@@ -1,6 +1,6 @@
 name: astrbot_plugin_model_connectivity
 desc: 查看 WebUI 已打开模型的连通性，并发送一张状态看板图片。
-version: v1.4.1
+version: v1.4.2
 author: Codex
 repo: "https://github.com/blueraina/astrbot_plugin_model_connectivity"
 astrbot_version: ">=4.9.2"

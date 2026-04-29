@@ -79,7 +79,7 @@ PROVIDER_ICONS = {
     PLUGIN_NAME,
     "Codex",
     "检测 WebUI 已打开的模型连通性，并发送状态看板图片。",
-    "1.4.1",
+    "1.4.2",
 )
 class ModelConnectivityPlugin(Star):
     def __init__(self, context: Context, config: Optional[dict] = None):
@@ -926,7 +926,7 @@ class ModelConnectivityPlugin(Star):
         if parsed.scheme in ("http", "https"):
             request = urllib.request.Request(
                 icon_url,
-                headers={"User-Agent": f"{PLUGIN_NAME}/1.4.1"},
+                headers={"User-Agent": f"{PLUGIN_NAME}/1.4.2"},
             )
             with urllib.request.urlopen(request, timeout=8) as response:
                 return response.read()
