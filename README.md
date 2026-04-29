@@ -2,6 +2,10 @@
 
 这个插件会枚举当前 AstrBot WebUI 中已打开的聊天模型，并检测这些模型的连通性，最后发送一张类似状态页的看板图片。
 
+## 生成效果示例
+
+![模型连通性生成图示例](docs/images/model-connectivity-example.png)
+
 ## 命令
 
 - `/modeltest`
