@@ -1881,6 +1881,7 @@ with sync_playwright() as p:
             "providers": providers,
             "provider_errors": provider_errors,
             "overall_status": "OPERATIONAL" if error_count == 0 else "DEGRADED",
+            "overall_class": "ok" if error_count == 0 else "error",
             "history_size": history_size,
             "stats_window_days": stats_days,
             "theme": theme,
@@ -2323,6 +2324,10 @@ STATUS_TEMPLATE = r"""
       box-shadow: 0 12px 24px rgba(0, 0, 0, 0.3), inset 0 1px 1px rgba(255, 255, 255, 0.1);
     }
 
+    .overall.ok .dot { color: #18e78d; box-shadow: 0 0 8px #18e78d; }
+    .overall.slow .dot { color: #ffb11a; box-shadow: 0 0 8px #ffb11a; }
+    .overall.error .dot { color: #ff4d5e; box-shadow: 0 0 8px #ff4d5e; }
+
     .grid {
       column-count: 2;
       column-gap: 24px;
@@ -2646,6 +2651,14 @@ STATUS_TEMPLATE = r"""
       box-shadow: 0 8px 24px rgba(0, 0, 0, 0.06), inset 0 1px 1px rgba(255, 255, 255, 1);
     }
 
+    .light .pill.ok { color: #059669; border-color: rgba(16, 185, 129, 0.4); background: linear-gradient(135deg, rgba(16, 185, 129, 0.15), rgba(16, 185, 129, 0.05)); }
+    .light .pill.slow { color: #d97706; border-color: rgba(245, 158, 11, 0.4); background: linear-gradient(135deg, rgba(245, 158, 11, 0.15), rgba(245, 158, 11, 0.05)); }
+    .light .pill.error { color: #e11d48; border-color: rgba(225, 29, 72, 0.4); background: linear-gradient(135deg, rgba(225, 29, 72, 0.15), rgba(225, 29, 72, 0.05)); }
+    
+    .light .overall.ok .dot { color: #059669; box-shadow: 0 0 8px rgba(5, 150, 105, 0.5); }
+    .light .overall.slow .dot { color: #d97706; box-shadow: 0 0 8px rgba(217, 119, 6, 0.5); }
+    .light .overall.error .dot { color: #e11d48; box-shadow: 0 0 8px rgba(225, 29, 72, 0.5); }
+
     .light .model-row {
       background: linear-gradient(135deg, rgba(255, 255, 255, 0.6) 0%, rgba(255, 255, 255, 0.3) 100%);
       border-color: rgba(255, 255, 255, 0.8);
@@ -2693,7 +2706,7 @@ STATUS_TEMPLATE = r"""
         </div>
       </div>
       <div class="right-meta">
-        <div class="overall"><span class="dot"></span>{{ overall_status }}</div>
+        <div class="overall {{ overall_class }}"><span class="dot"></span>{{ overall_status }}</div>
         <div>更新于 {{ generated_at }} · 耗时 {{ elapsed_ms }} ms</div>
         <div>全局并发 {{ global_concurrency }} · 单 Provider {{ provider_concurrency }} · 统计 {{ stats_window_days }} 天 · 历史 {{ history_size }} 次</div>
       </div>
