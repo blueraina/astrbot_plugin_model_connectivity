@@ -5,7 +5,7 @@
 ## 生成效果示例
 
 ![模型连通性生成图示例](docs/images/model-connectivity-example.png)
-
+![模型连通性生成图示例(remote)](docs/images/remote_example.png)
 ## 命令
 
 - `/modeltest`
