@@ -496,6 +496,52 @@ class ModelConnectivityPlugin(Star):
         raise RuntimeError("; ".join(errors) or "no image renderer available")
 
     async def _render_remote_report_image(self, report: dict[str, Any]) -> str:
+        # 尝试使用本地 Playwright（通过独立子进程运行，避免 AstrBot 的事件循环冲突）
+        try:
+            from jinja2 import Template
+            import subprocess
+            import asyncio
+            import sys
+            
+            template = Template(STATUS_TEMPLATE)
+            html_content = template.render(**report)
+            
+            script = """
+import sys, os, uuid, tempfile
+try:
+    from playwright.sync_api import sync_playwright
+except ImportError:
+    sys.exit(1)
+
+# 强制使用 utf-8 解码，解决 Windows 下的中文乱码问题
+html_content = sys.stdin.buffer.read().decode('utf-8')
+with sync_playwright() as p:
+    browser = p.chromium.launch(headless=True)
+    page = browser.new_page(viewport={"width": 1500, "height": 860})
+    page.set_content(html_content, wait_until="networkidle")
+    save_path = os.path.join(tempfile.gettempdir(), f"model_connectivity_pw_{uuid.uuid4().hex}.png")
+    page.screenshot(path=save_path, full_page=True)
+    browser.close()
+    print(save_path, end="")
+"""
+            process = await asyncio.create_subprocess_exec(
+                sys.executable, "-c", script,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE
+            )
+            stdout, stderr = await process.communicate(input=html_content.encode('utf-8'))
+            if process.returncode == 0:
+                save_path = stdout.decode('utf-8').strip()
+                if save_path and save_path.endswith('.png'):
+                    return save_path
+            else:
+                err_msg = stderr.decode('utf-8', errors='ignore')
+                logger.warning(f"本地 Playwright 子进程渲染失败: {err_msg}")
+        except Exception as e:
+            logger.warning(f"本地 Playwright 包装器执行异常: {e}")
+
+        # 兜底使用远端渲染
         return await self.html_render(
             STATUS_TEMPLATE,
             report,
@@ -2160,9 +2206,9 @@ STATUS_TEMPLATE = r"""
       color: #f5f7fb;
       font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
       background: 
-        radial-gradient(circle at 15% 50%, rgba(20, 255, 140, 0.05), transparent 25%),
-        radial-gradient(circle at 85% 30%, rgba(255, 77, 94, 0.05), transparent 25%),
-        radial-gradient(circle at 50% 80%, rgba(26, 177, 255, 0.05), transparent 25%),
+        radial-gradient(circle at 15% 50%, rgba(20, 255, 140, 0.08), transparent 30%),
+        radial-gradient(circle at 85% 30%, rgba(255, 77, 94, 0.08), transparent 30%),
+        radial-gradient(circle at 50% 80%, rgba(26, 177, 255, 0.08), transparent 30%),
         linear-gradient(rgba(255, 255, 255, 0.03) 1px, transparent 1px),
         linear-gradient(90deg, rgba(255, 255, 255, 0.03) 1px, transparent 1px),
         #0a0b0c;
@@ -2229,17 +2275,17 @@ STATUS_TEMPLATE = r"""
       gap: 8px;
       border-radius: 999px;
       padding: 8px 14px;
-      border: 1px solid rgba(255, 255, 255, 0.08);
-      background: rgba(255, 255, 255, 0.03);
-      backdrop-filter: blur(12px);
-      -webkit-backdrop-filter: blur(12px);
-      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      background: linear-gradient(135deg, rgba(255, 255, 255, 0.1) 0%, rgba(255, 255, 255, 0.02) 100%);
+      backdrop-filter: blur(20px) saturate(150%);
+      -webkit-backdrop-filter: blur(20px) saturate(150%);
+      box-shadow: 0 8px 16px rgba(0, 0, 0, 0.2), inset 0 1px 1px rgba(255, 255, 255, 0.1);
       color: #d9dde5;
     }
 
-    .pill.ok { color: #18e78d; background: rgba(11, 159, 93, 0.1); border-color: rgba(24, 231, 141, 0.2); box-shadow: 0 0 15px rgba(24, 231, 141, 0.1); }
-    .pill.slow { color: #ffb11a; background: rgba(255, 177, 26, 0.1); border-color: rgba(255, 177, 26, 0.2); box-shadow: 0 0 15px rgba(255, 177, 26, 0.1); }
-    .pill.error { color: #ff4d5e; background: rgba(255, 77, 94, 0.1); border-color: rgba(255, 77, 94, 0.2); box-shadow: 0 0 15px rgba(255, 77, 94, 0.1); }
+    .pill.ok { color: #18e78d; background: linear-gradient(135deg, rgba(11, 159, 93, 0.2), rgba(11, 159, 93, 0.05)); border-color: rgba(24, 231, 141, 0.3); box-shadow: 0 0 15px rgba(24, 231, 141, 0.15), inset 0 1px 1px rgba(255, 255, 255, 0.1); }
+    .pill.slow { color: #ffb11a; background: linear-gradient(135deg, rgba(255, 177, 26, 0.2), rgba(255, 177, 26, 0.05)); border-color: rgba(255, 177, 26, 0.3); box-shadow: 0 0 15px rgba(255, 177, 26, 0.15), inset 0 1px 1px rgba(255, 255, 255, 0.1); }
+    .pill.error { color: #ff4d5e; background: linear-gradient(135deg, rgba(255, 77, 94, 0.2), rgba(255, 77, 94, 0.05)); border-color: rgba(255, 77, 94, 0.3); box-shadow: 0 0 15px rgba(255, 77, 94, 0.15), inset 0 1px 1px rgba(255, 255, 255, 0.1); }
 
     .dot {
       width: 8px;
@@ -2267,14 +2313,14 @@ STATUS_TEMPLATE = r"""
       padding: 12px 20px;
       border-radius: 999px;
       color: #ffffff;
-      border: 1px solid rgba(255, 255, 255, 0.1);
-      background: rgba(255, 255, 255, 0.05);
-      backdrop-filter: blur(16px);
-      -webkit-backdrop-filter: blur(16px);
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      background: linear-gradient(135deg, rgba(255, 255, 255, 0.1) 0%, rgba(255, 255, 255, 0.02) 100%);
+      backdrop-filter: blur(30px) saturate(150%);
+      -webkit-backdrop-filter: blur(30px) saturate(150%);
       font-size: 14px;
       font-weight: 800;
       letter-spacing: 0.5px;
-      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.2);
+      box-shadow: 0 12px 24px rgba(0, 0, 0, 0.3), inset 0 1px 1px rgba(255, 255, 255, 0.1);
     }
 
     .grid {
@@ -2288,12 +2334,12 @@ STATUS_TEMPLATE = r"""
       margin: 0 0 24px;
       break-inside: avoid;
       page-break-inside: avoid;
-      border: 1px solid rgba(255, 255, 255, 0.08);
-      border-radius: 16px;
-      background: linear-gradient(180deg, rgba(255, 255, 255, 0.04) 0%, rgba(255, 255, 255, 0.01) 100%);
-      backdrop-filter: blur(24px);
-      -webkit-backdrop-filter: blur(24px);
-      box-shadow: 0 24px 48px rgba(0, 0, 0, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.1);
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      border-radius: 24px;
+      background: linear-gradient(135deg, rgba(255, 255, 255, 0.08) 0%, rgba(255, 255, 255, 0.01) 100%);
+      backdrop-filter: blur(40px) saturate(180%);
+      -webkit-backdrop-filter: blur(40px) saturate(180%);
+      box-shadow: 0 24px 48px rgba(0, 0, 0, 0.3), inset 0 1px 1px rgba(255, 255, 255, 0.1);
       overflow: hidden;
     }
 
@@ -2302,8 +2348,8 @@ STATUS_TEMPLATE = r"""
       align-items: center;
       gap: 16px;
       padding: 24px;
-      border-bottom: 1px solid rgba(255, 255, 255, 0.06);
-      background: rgba(0, 0, 0, 0.1);
+      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+      background: rgba(0, 0, 0, 0.15);
     }
 
     .provider-icon {
@@ -2312,11 +2358,13 @@ STATUS_TEMPLATE = r"""
       flex: 0 0 auto;
       width: 52px;
       height: 52px;
-      border-radius: 14px;
-      background: linear-gradient(135deg, #2a2d32 0%, #151719 100%);
+      border-radius: 16px;
+      background: linear-gradient(135deg, rgba(255, 255, 255, 0.15) 0%, rgba(255, 255, 255, 0.02) 100%);
+      backdrop-filter: blur(20px);
+      -webkit-backdrop-filter: blur(20px);
       color: #fff;
-      border: 1px solid rgba(255, 255, 255, 0.1);
-      box-shadow: 0 8px 16px rgba(0, 0, 0, 0.3), inset 0 2px 4px rgba(255, 255, 255, 0.05);
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      box-shadow: 0 8px 16px rgba(0, 0, 0, 0.4), inset 0 1px 2px rgba(255, 255, 255, 0.2);
       font-size: 20px;
       font-weight: 800;
     }
@@ -2324,7 +2372,15 @@ STATUS_TEMPLATE = r"""
     .provider-icon svg {
       width: 24px;
       height: 24px;
-      fill: currentColor;
+      fill: currentColor !important;
+    }
+
+    .provider-icon svg path {
+      fill: currentColor !important;
+    }
+
+    .provider-icon img {
+      filter: brightness(0) invert(1);
     }
 
     .provider-info h2 {
@@ -2336,7 +2392,7 @@ STATUS_TEMPLATE = r"""
 
     .provider-info p {
       margin: 6px 0 0;
-      color: #8b9099;
+      color: #a0a5b0;
       font-size: 13px;
       font-weight: 600;
     }
@@ -2347,13 +2403,16 @@ STATUS_TEMPLATE = r"""
       padding: 6px 12px;
       font-size: 12px;
       font-weight: 800;
-      border: 1px solid rgba(255, 255, 255, 0.08);
-      background: rgba(0,0,0,0.2);
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      background: linear-gradient(135deg, rgba(255, 255, 255, 0.1), rgba(255, 255, 255, 0.02));
+      backdrop-filter: blur(10px);
+      -webkit-backdrop-filter: blur(10px);
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2), inset 0 1px 1px rgba(255, 255, 255, 0.1);
     }
 
-    .provider-status.ok, .status-badge.ok { color: #18e78d; border-color: rgba(24, 231, 141, 0.3); box-shadow: 0 0 10px rgba(24, 231, 141, 0.15); }
-    .provider-status.slow, .status-badge.slow { color: #ffb11a; border-color: rgba(255, 177, 26, 0.3); box-shadow: 0 0 10px rgba(255, 177, 26, 0.15); }
-    .provider-status.error, .status-badge.error { color: #ff4d5e; border-color: rgba(255, 77, 94, 0.3); box-shadow: 0 0 10px rgba(255, 77, 94, 0.15); }
+    .provider-status.ok, .status-badge.ok { color: #18e78d; border-color: rgba(24, 231, 141, 0.4); box-shadow: 0 0 10px rgba(24, 231, 141, 0.2), inset 0 1px 1px rgba(255, 255, 255, 0.1); background: linear-gradient(135deg, rgba(11, 159, 93, 0.3), rgba(11, 159, 93, 0.1)); }
+    .provider-status.slow, .status-badge.slow { color: #ffb11a; border-color: rgba(255, 177, 26, 0.4); box-shadow: 0 0 10px rgba(255, 177, 26, 0.2), inset 0 1px 1px rgba(255, 255, 255, 0.1); background: linear-gradient(135deg, rgba(255, 177, 26, 0.3), rgba(255, 177, 26, 0.1)); }
+    .provider-status.error, .status-badge.error { color: #ff4d5e; border-color: rgba(255, 77, 94, 0.4); box-shadow: 0 0 10px rgba(255, 77, 94, 0.2), inset 0 1px 1px rgba(255, 255, 255, 0.1); background: linear-gradient(135deg, rgba(255, 77, 94, 0.3), rgba(255, 77, 94, 0.1)); }
 
     .models {
       padding: 20px;
@@ -2364,11 +2423,14 @@ STATUS_TEMPLATE = r"""
 
     .model-row {
       position: relative;
-      border: 1px solid rgba(255, 255, 255, 0.05);
-      border-radius: 12px;
-      background: rgba(255, 255, 255, 0.02);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 16px;
+      background: linear-gradient(135deg, rgba(255, 255, 255, 0.05) 0%, rgba(255, 255, 255, 0.01) 100%);
       padding: 16px;
-      transition: background 0.2s;
+      transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+      backdrop-filter: blur(20px);
+      -webkit-backdrop-filter: blur(20px);
+      box-shadow: inset 0 1px 1px rgba(255, 255, 255, 0.05);
     }
 
     .curve-container {
@@ -2386,12 +2448,13 @@ STATUS_TEMPLATE = r"""
       height: 100%;
       opacity: 0.8;
       pointer-events: none;
+      overflow: visible;
     }
 
     .curve-chart .area { fill: url(#curve-gradient-dark); }
-    .curve-chart .line { fill: none; stroke: #8b5cf6; stroke-width: 1.5; }
+    .curve-chart .line { fill: none; stroke: #8b5cf6; stroke-width: 1.5; vector-effect: non-scaling-stroke; }
     .light .curve-chart .area { fill: url(#curve-gradient-light); }
-    .light .curve-chart .line { stroke: #6366f1; }
+    .light .curve-chart .line { stroke: #6366f1; vector-effect: non-scaling-stroke; }
 
     .time-axis {
       position: absolute;
@@ -2453,8 +2516,11 @@ STATUS_TEMPLATE = r"""
       padding: 5px 10px;
       font-size: 11px;
       font-weight: 800;
-      border: 1px solid rgba(255, 255, 255, 0.08);
-      background: rgba(0,0,0,0.2);
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      background: linear-gradient(135deg, rgba(255, 255, 255, 0.1), rgba(255, 255, 255, 0.02));
+      backdrop-filter: blur(10px);
+      -webkit-backdrop-filter: blur(10px);
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2), inset 0 1px 1px rgba(255, 255, 255, 0.1);
     }
 
     .metric-grid {
@@ -2466,10 +2532,13 @@ STATUS_TEMPLATE = r"""
 
     .metric {
       min-width: 0;
-      border-radius: 10px;
-      background: rgba(0, 0, 0, 0.2);
-      border: 1px solid rgba(255, 255, 255, 0.03);
-      padding: 12px;
+      border-radius: 12px;
+      background: linear-gradient(135deg, rgba(255, 255, 255, 0.08) 0%, rgba(255, 255, 255, 0.02) 100%);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      padding: 12px 16px;
+      backdrop-filter: blur(20px);
+      -webkit-backdrop-filter: blur(20px);
+      box-shadow: inset 0 1px 1px rgba(255, 255, 255, 0.05);
     }
 
     .metric label {
@@ -2501,7 +2570,7 @@ STATUS_TEMPLATE = r"""
     .bar {
       flex: 1 1 0;
       min-width: 4px;
-      border-radius: 999px;
+      border-radius: 2px;
       background: rgba(255, 255, 255, 0.08);
       transition: height 0.3s ease;
     }
@@ -2525,12 +2594,12 @@ STATUS_TEMPLATE = r"""
     body.light {
       color: #111827;
       background: 
-        radial-gradient(circle at 15% 50%, rgba(20, 255, 140, 0.1), transparent 25%),
-        radial-gradient(circle at 85% 30%, rgba(255, 77, 94, 0.1), transparent 25%),
-        radial-gradient(circle at 50% 80%, rgba(26, 177, 255, 0.1), transparent 25%),
-        linear-gradient(rgba(15, 23, 42, 0.03) 1px, transparent 1px),
-        linear-gradient(90deg, rgba(15, 23, 42, 0.03) 1px, transparent 1px),
-        #f8fafc;
+        radial-gradient(circle at 15% 50%, rgba(20, 255, 140, 0.2), transparent 35%),
+        radial-gradient(circle at 85% 30%, rgba(255, 77, 94, 0.2), transparent 35%),
+        radial-gradient(circle at 50% 80%, rgba(26, 177, 255, 0.2), transparent 35%),
+        linear-gradient(rgba(255, 255, 255, 0.5) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255, 255, 255, 0.5) 1px, transparent 1px),
+        #f0f4f8;
       background-size: 100% 100%, 100% 100%, 100% 100%, 38px 38px, 38px 38px;
     }
 
@@ -2540,21 +2609,25 @@ STATUS_TEMPLATE = r"""
     }
 
     .light .provider-card {
-      background: rgba(255, 255, 255, 0.7);
+      background: linear-gradient(135deg, rgba(255, 255, 255, 0.7) 0%, rgba(255, 255, 255, 0.3) 100%);
       border-color: rgba(255, 255, 255, 0.8);
-      box-shadow: 0 24px 48px rgba(0, 0, 0, 0.05), inset 0 1px 0 rgba(255, 255, 255, 1);
+      box-shadow: 0 24px 48px rgba(0, 0, 0, 0.05), inset 0 1px 1px rgba(255, 255, 255, 1);
     }
 
     .light .provider-head {
-      background: rgba(255, 255, 255, 0.5);
-      border-bottom-color: rgba(15, 23, 42, 0.06);
+      background: rgba(255, 255, 255, 0.4);
+      border-bottom-color: rgba(0, 0, 0, 0.05);
     }
 
     .light .provider-icon {
-      background: #ffffff;
-      border: 1px solid rgba(15, 23, 42, 0.1);
-      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.05);
+      background: linear-gradient(135deg, rgba(255, 255, 255, 0.9) 0%, rgba(255, 255, 255, 0.5) 100%);
+      border: 1px solid rgba(255, 255, 255, 1);
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.08), inset 0 1px 2px rgba(255, 255, 255, 1);
       color: #111827;
+    }
+
+    .light .provider-icon img {
+      filter: brightness(0);
     }
 
     .light .provider-info h2,
@@ -2567,27 +2640,31 @@ STATUS_TEMPLATE = r"""
     .light .eyebrow { color: #64748b; }
 
     .light .pill, .light .overall {
-      background: rgba(255, 255, 255, 0.9);
+      background: linear-gradient(135deg, rgba(255, 255, 255, 0.9) 0%, rgba(255, 255, 255, 0.5) 100%);
       color: #334155;
-      border-color: rgba(15, 23, 42, 0.1);
-      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.05);
+      border-color: rgba(255, 255, 255, 0.8);
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.06), inset 0 1px 1px rgba(255, 255, 255, 1);
     }
 
     .light .model-row {
-      background: rgba(255, 255, 255, 0.6);
-      border-color: rgba(15, 23, 42, 0.05);
-      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.02);
+      background: linear-gradient(135deg, rgba(255, 255, 255, 0.6) 0%, rgba(255, 255, 255, 0.3) 100%);
+      border-color: rgba(255, 255, 255, 0.8);
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.02), inset 0 1px 1px rgba(255, 255, 255, 1);
     }
 
     .light .metric {
-      background: rgba(255, 255, 255, 0.8);
-      border-color: rgba(15, 23, 42, 0.05);
+      background: linear-gradient(135deg, rgba(255, 255, 255, 0.7) 0%, rgba(255, 255, 255, 0.4) 100%);
+      border-color: rgba(255, 255, 255, 0.9);
+      box-shadow: inset 0 1px 1px rgba(255, 255, 255, 1);
     }
 
     .light .bar.empty { background: #e2e8f0; }
 
-    .light .provider-status { background: rgba(255, 255, 255, 0.8); }
-    .light .status-badge { background: rgba(255, 255, 255, 0.8); }
+    .light .provider-status, .light .status-badge { 
+      background: linear-gradient(135deg, rgba(255, 255, 255, 0.8) 0%, rgba(255, 255, 255, 0.4) 100%); 
+      border-color: rgba(255, 255, 255, 0.9);
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.05), inset 0 1px 1px rgba(255, 255, 255, 1);
+    }
   </style>
 </head>
 <body class="{{ theme }}">
