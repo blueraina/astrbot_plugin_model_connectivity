@@ -9,7 +9,7 @@
 ### 新版卡片风格
 
 | 夜间模式 |
-| --- |
+| :---: |
 | ![新版卡片风格夜间预览](assets/model-connectivity-new-dark.png) |
 | 白天模式 |
 | ![新版卡片风格白天预览](assets/model-connectivity-new-light.png) |
@@ -17,7 +17,7 @@
 ### 旧版卡片风格
 
 | 夜间模式 | 白天模式 |
-| --- | --- |
+| :---: | :---: |
 | ![旧版卡片风格夜间预览](assets/model-connectivity-old-dark.png) | ![旧版卡片风格白天预览](assets/model-connectivity-old-light.png) |
 
 ## 命令
