@@ -56,7 +56,7 @@
   "render_backend": {
     "description": "图片渲染方式",
     "type": "string",
-    "default": "local",
+    "default": "auto",
     "hint": "local 表示插件本地生成 PNG，不依赖远端 t2i；remote 表示使用 AstrBot 的 html_render；auto 表示先远端后本地。"
   },
   "fallback_to_remote_render": {

@@ -18,13 +18,9 @@
 
 ### 旧版卡片风格
 
-夜间模式：
-
-![旧版卡片风格夜间预览](assets/model-connectivity-old-dark.png)
-
-白天模式：
-
-![旧版卡片风格白天预览](assets/model-connectivity-old-light.png)
+| 夜间模式 | 白天模式 |
+| --- | --- |
+| ![旧版卡片风格夜间预览](assets/model-connectivity-old-dark.png) | ![旧版卡片风格白天预览](assets/model-connectivity-old-light.png) |
 
 ## 命令
 
@@ -46,7 +42,7 @@
 - 最近若干次检测历史条
 - 周可用率
 - 支持 `dashboard_style = new` 新版卡片风格；也可设为 `old` 使用旧版卡片风格
-- 默认本地生成 PNG 图片，不依赖 AstrBot 远端 t2i 服务
+- 默认 `render_backend = auto`，优先使用 AstrBot `html_render`，失败后回退到本地 PNG
 - 支持 `image_scale` 高清输出，默认 2 倍
 - 支持白天/夜间主题，默认按时间自动切换
 - 支持后台定时自动检测，自动更新历史和周统计
@@ -69,7 +65,7 @@ data/plugins/astrbot_plugin_model_connectivity
 
 如果你想恢复旧行为，检测 Provider 暴露出的模型列表，可以把 `detect_enabled_models_only` 设为 `false`；这时 `max_models_per_provider` 可用于限制每个 Provider 最多检测多少个模型。
 
-默认 `render_backend = local`，插件会用 Pillow 在本地生成 PNG，避免 AstrBot 远端 HTML 转图服务不可用时失败。如果想使用 AstrBot 自带 `html_render`，可以把 `render_backend` 设为 `remote`；`auto` 会先尝试远端渲染，失败后再回退到本地渲染。
+默认 `render_backend = auto`，插件会先尝试 AstrBot 自带 `html_render` 生成状态图，失败后再回退到本地 Pillow PNG。如果想强制使用远端渲染，可以设为 `remote`；如果想优先本地生成，可以设为 `local`，并可关闭 `fallback_to_remote_render` 来完全避免远端兜底。
 
 风格相关配置：
 

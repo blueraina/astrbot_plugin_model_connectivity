@@ -477,7 +477,7 @@ class ModelConnectivityPlugin(Star):
             return [Comp.Image.fromFileSystem(image_path)]
 
     async def _render_report_image(self, report: dict[str, Any]) -> str:
-        backend = self._cfg_str("render_backend", "local").strip().lower()
+        backend = self._cfg_str("render_backend", "auto").strip().lower()
         fallback_to_remote = self._cfg_bool("fallback_to_remote_render", True)
         errors: list[str] = []
 
