@@ -2,10 +2,30 @@
 
 这个插件会枚举当前 AstrBot WebUI 中已打开的聊天模型，并检测这些模型的连通性，最后发送一张类似状态页的看板图片。
 
-## 生成效果示例
+## 预览
 
-![模型连通性生成图示例](docs/images/model-connectivity-example.png)
-![模型连通性生成图示例(remote)](docs/images/remote_example.png)
+以下预览图使用 `remote` / `html_render` 渲染路径生成。
+
+### 新版卡片风格
+
+夜间模式：
+
+![新版卡片风格夜间预览](assets/model-connectivity-new-dark.png)
+
+白天模式：
+
+![新版卡片风格白天预览](assets/model-connectivity-new-light.png)
+
+### 旧版卡片风格
+
+夜间模式：
+
+![旧版卡片风格夜间预览](assets/model-connectivity-old-dark.png)
+
+白天模式：
+
+![旧版卡片风格白天预览](assets/model-connectivity-old-light.png)
+
 ## 命令
 
 - `/modeltest`
@@ -25,15 +45,13 @@
 - 周成功次数，格式为 `成功次数/总测试次数`
 - 最近若干次检测历史条
 - 周可用率
+- 支持 `dashboard_style = new` 新版卡片风格；也可设为 `old` 使用旧版卡片风格
 - 默认本地生成 PNG 图片，不依赖 AstrBot 远端 t2i 服务
-- **全新升级：采用“液态玻璃”美学设计**（需在配置中开启 `remote` 渲染后端）
-- **本地 Playwright 高清渲染支持**：在开启 `remote` 且本地已安装 Playwright 的情况下，通过独立子进程在本地秒级渲染高清图片，完美支持各类 CSS 滤镜及复杂动画效果
-- 支持 `image_scale` 高清输出（针对旧版 Pillow 渲染），默认 2 倍
-- 支持白天/夜间主题自动切换，暗色/浅色模式下的 Provider Logo 均会自动适配对比度
+- 支持 `image_scale` 高清输出，默认 2 倍
+- 支持白天/夜间主题，默认按时间自动切换
 - 支持后台定时自动检测，自动更新历史和周统计
 - 支持后台定时发送最近一次状态图，不会触发新的检测
 - 支持从 `providerUtils.js` 读取 Provider 图标映射，并在本地 PNG 中显示头像
-- 内置 `logo.png`，用于 AstrBot 插件市场头像展示
 
 ## 安装
 
@@ -51,7 +69,13 @@ data/plugins/astrbot_plugin_model_connectivity
 
 如果你想恢复旧行为，检测 Provider 暴露出的模型列表，可以把 `detect_enabled_models_only` 设为 `false`；这时 `max_models_per_provider` 可用于限制每个 Provider 最多检测多少个模型。
 
-默认 `render_backend = local`，插件会用 Pillow 在本地生成 PNG，避免 AstrBot 远端 HTML 转图服务不可用时失败。如果想继续使用 AstrBot 自带 `html_render`，可以把 `render_backend` 设为 `remote`。
+默认 `render_backend = local`，插件会用 Pillow 在本地生成 PNG，避免 AstrBot 远端 HTML 转图服务不可用时失败。如果想使用 AstrBot 自带 `html_render`，可以把 `render_backend` 设为 `remote`；`auto` 会先尝试远端渲染，失败后再回退到本地渲染。
+
+风格相关配置：
+
+- `dashboard_style`：`new` 为默认新版卡片风格，按 Provider 分组展示模型状态；`old` 为旧版卡片风格。
+- 兼容旧配置：如果你之前使用过 `dashboard_layout`，插件仍会识别；新安装或在 WebUI 中配置时建议使用 `dashboard_style`。
+- `show_curve_chart`：仅旧版卡片风格生效，开启后会在面板下方绘制近期的延迟折线图。
 
 主题相关配置：
 
@@ -62,7 +86,6 @@ data/plugins/astrbot_plugin_model_connectivity
 
 - `auto_check_interval_min_hours`：定时自动检测的最小间隔小时，`0` 表示关闭。
 - `auto_check_interval_max_hours`：定时自动检测的最大间隔小时，例如最小 `2`、最大 `5` 表示每轮随机等待 `2-5` 小时。
-- `auto_check_run_on_start`：插件启动后是否立即自动检测一次。
 
 后台定时检测只更新历史记录、周成功次数和可用率，不会主动往聊天里发送图片。
 

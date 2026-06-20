@@ -29,6 +29,12 @@
     "default": 2.0,
     "hint": "本地渲染 PNG 的输出倍率，1-3；2 表示输出 3000px 宽图片，清晰度更高但文件更大。"
   },
+  "dashboard_style": {
+    "description": "状态图风格",
+    "type": "string",
+    "default": "new",
+    "hint": "new 表示新版卡片风格；old 表示旧版卡片风格。兼容填写 新版/旧版。"
+  },
   "theme_mode": {
     "description": "图片主题模式",
     "type": "string",
@@ -51,7 +57,7 @@
     "description": "图片渲染方式",
     "type": "string",
     "default": "local",
-    "hint": "local 表示插件本地生成 PNG，不依赖远端 t2i；remote 表示使用 AstrBot 的 html_render；auto 表示先本地后远端。"
+    "hint": "local 表示插件本地生成 PNG，不依赖远端 t2i；remote 表示使用 AstrBot 的 html_render；auto 表示先远端后本地。"
   },
   "fallback_to_remote_render": {
     "description": "本地渲染失败时尝试远端转图",
@@ -82,12 +88,6 @@
     "type": "float",
     "default": 0.0,
     "hint": "需大于 0 才会开启自动检测；例如最小 2、最大 5 表示每轮检测间隔随机为 2-5 小时。"
-  },
-  "auto_check_run_on_start": {
-    "description": "启动后立即自动检测一次",
-    "type": "bool",
-    "default": false,
-    "hint": "开启后插件加载时会先自动检测一轮，然后再按最小/最大间隔随机等待下一轮。"
   },
   "auto_status_send_interval_hours": {
     "description": "定时发送最新状态图间隔小时",
@@ -144,10 +144,10 @@
     "hint": "开启后会使用 AstrBot 插件 KV 存储记录最近检测结果。"
   },
   "show_curve_chart": {
-    "description": "显示延迟背景曲线",
+    "description": "旧版卡片延迟背景曲线",
     "type": "bool",
     "default": true,
-    "hint": "开启后会在面板下方绘制近期的延迟折线图"
+    "hint": "仅旧版卡片风格生效；开启后会在面板下方绘制近期的延迟折线图。"
   },
   "stats_window_days": {
     "description": "统计窗口天数",

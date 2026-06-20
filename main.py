@@ -245,9 +245,6 @@ class ModelConnectivityPlugin(Star):
         self._auto_check_task = loop.create_task(self._auto_check_loop())
 
     async def _auto_check_loop(self) -> None:
-        if self._cfg_bool("auto_check_run_on_start", False):
-            await self._run_auto_check_once()
-
         while True:
             interval_range = self._auto_check_interval_range()
             if interval_range is None:
@@ -388,6 +385,13 @@ class ModelConnectivityPlugin(Star):
         theme = self._theme_name(now)
         snapshot["theme"] = theme
         snapshot["theme_label"] = "白天" if theme == "light" else "夜间"
+        snapshot["dashboard_layout"] = self._dashboard_layout()
+        for provider in snapshot.get("providers", []) or []:
+            if not isinstance(provider, dict):
+                continue
+            for item in provider.get("results", []) or []:
+                if isinstance(item, dict):
+                    item["history_rows"] = self._row_history_bars(item.get("history", []))
         return snapshot
 
     async def _remember_status_send_target_from_event(self, event: Any) -> None:
@@ -477,16 +481,37 @@ class ModelConnectivityPlugin(Star):
         fallback_to_remote = self._cfg_bool("fallback_to_remote_render", True)
         errors: list[str] = []
 
-        if backend in ("local", "pillow", "auto"):
+        if backend == "auto":
+            try:
+                return await self._render_remote_report_image(report)
+            except Exception as exc:
+                logger.warning("Remote report image rendering failed: %s", exc)
+                errors.append(f"remote: {exc}")
             try:
                 return await asyncio.to_thread(self._render_local_report_image, report)
             except Exception as exc:
                 logger.warning("Local report image rendering failed: %s", exc)
                 errors.append(f"local: {exc}")
-                if backend in ("local", "pillow") and not fallback_to_remote:
+            raise RuntimeError("; ".join(errors) or "no image renderer available")
+
+        if backend in ("remote", "html"):
+            try:
+                return await self._render_remote_report_image(report)
+            except Exception as exc:
+                logger.warning("Remote report image rendering failed: %s", exc)
+                errors.append(f"remote: {exc}")
+                raise RuntimeError("; ".join(errors) or "no image renderer available") from exc
+
+        if backend in ("local", "pillow"):
+            try:
+                return await asyncio.to_thread(self._render_local_report_image, report)
+            except Exception as exc:
+                logger.warning("Local report image rendering failed: %s", exc)
+                errors.append(f"local: {exc}")
+                if not fallback_to_remote:
                     raise
 
-        if backend in ("remote", "html", "auto") or fallback_to_remote:
+        if fallback_to_remote:
             try:
                 return await self._render_remote_report_image(report)
             except Exception as exc:
@@ -563,17 +588,33 @@ with sync_playwright() as p:
         width = 1500
         padding = 48
         gap = 22
-        header_height = 180
+        header_height = 168
         card_width = (width - padding * 2 - gap) // 2
         theme = self._theme_palette(str(report.get("theme") or "dark"))
 
         fonts = {
-            "title": self._load_pil_font(ImageFont, 64, bold=True),
+            "title": self._load_pil_font(ImageFont, 54, bold=True),
             "h2": self._load_pil_font(ImageFont, 24, bold=True),
             "body": self._load_pil_font(ImageFont, 16, bold=True),
+            "time": self._load_pil_font(ImageFont, 19, bold=True),
             "small": self._load_pil_font(ImageFont, 13, bold=True),
             "tiny": self._load_pil_font(ImageFont, 11, bold=True),
+            "metric": self._load_pil_mono_font(ImageFont, 16, bold=True),
         }
+
+        if self._dashboard_layout() == "rows":
+            return self._render_local_rows_report_image(
+                report,
+                Image,
+                ImageDraw,
+                fonts,
+                scale,
+                width,
+                padding,
+                gap,
+                header_height,
+                theme,
+            )
 
         providers = report.get("providers", [])
         cards: list[dict[str, Any]] = []
@@ -612,7 +653,7 @@ with sync_playwright() as p:
         image = Image.new("RGB", (width, height), theme["bg"])
         draw = ImageDraw.Draw(image)
         self._draw_grid(draw, width, height, theme)
-        self._draw_report_header(draw, report, fonts, padding, width, theme)
+        self._draw_report_header(image, draw, report, fonts, padding, width, theme)
 
         for index, x, y, w, h in positions:
             self._draw_provider_card(
@@ -640,6 +681,97 @@ with sync_playwright() as p:
                 theme,
             )
 
+        return self._save_local_report_image(image, scale, Image)
+
+    def _render_local_rows_report_image(
+        self,
+        report: dict[str, Any],
+        Image: Any,
+        ImageDraw: Any,
+        fonts: dict[str, Any],
+        scale: float,
+        width: int,
+        padding: int,
+        gap: int,
+        header_height: int,
+        theme: dict[str, Any],
+    ) -> str:
+        providers = report.get("providers", [])
+        provider_width = width - padding * 2
+        provider_padding = 18
+        provider_head_h = 58
+        row_gap = 10
+        row_h = 76
+        row_error_extra = 28
+
+        groups: list[dict[str, Any]] = []
+        for provider in providers:
+            row_heights = [
+                row_h + (row_error_extra if item.get("error") else 0)
+                for item in provider.get("results", [])
+            ]
+            rows_height = sum(row_heights)
+            if row_heights:
+                rows_height += row_gap * (len(row_heights) - 1)
+            group_height = provider_padding * 2 + provider_head_h + 12 + rows_height
+            groups.append(
+                {
+                    "provider": provider,
+                    "row_heights": row_heights,
+                    "height": group_height,
+                }
+            )
+
+        start_y = padding + header_height + 8
+        positions: list[tuple[int, int, int, int, int]] = []
+        cursor_y = start_y
+        for index, group in enumerate(groups):
+            positions.append((index, padding, cursor_y, provider_width, group["height"]))
+            cursor_y += group["height"] + gap
+
+        content_bottom = cursor_y - gap if groups else start_y
+
+        provider_errors = report.get("provider_errors", [])
+        provider_error_height = 0
+        if provider_errors:
+            provider_error_height = 68 + len(provider_errors) * 24
+
+        error_gap = gap if provider_errors else 0
+        height = max(620, content_bottom + error_gap + provider_error_height + padding)
+        image = Image.new("RGB", (width, height), theme["bg"])
+        draw = ImageDraw.Draw(image)
+        self._draw_grid(draw, width, height, theme)
+        self._draw_report_header(image, draw, report, fonts, padding, width, theme)
+
+        for index, x, y, w, h in positions:
+            self._draw_provider_row_group(
+                image,
+                draw,
+                groups[index]["provider"],
+                groups[index]["row_heights"],
+                x,
+                y,
+                w,
+                h,
+                fonts,
+                theme,
+            )
+
+        if provider_errors:
+            self._draw_provider_errors(
+                draw,
+                provider_errors,
+                padding,
+                content_bottom + gap,
+                width - padding * 2,
+                provider_error_height,
+                fonts,
+                theme,
+            )
+
+        return self._save_local_report_image(image, scale, Image)
+
+    def _save_local_report_image(self, image: Any, scale: float, Image: Any) -> str:
         output_dir = os.path.join(tempfile.gettempdir(), PLUGIN_NAME)
         os.makedirs(output_dir, exist_ok=True)
         output_path = os.path.join(
@@ -664,6 +796,7 @@ with sync_playwright() as p:
 
     def _draw_report_header(
         self,
+        image: Any,
         draw: Any,
         report: dict[str, Any],
         fonts: dict[str, Any],
@@ -671,14 +804,41 @@ with sync_playwright() as p:
         width: int,
         theme: dict[str, Any],
     ) -> None:
+        title_text = str(report.get("title") or "模型连通性")
+        draw.text((padding, 56), title_text, font=fonts["title"], fill=theme["text"])
+
+        time_text = f"更新于 {report.get('generated_at')}"
+        time_w = self._text_width(draw, time_text, fonts["time"])
+        title_w = self._text_width(draw, title_text, fonts["title"])
+        badge_w = time_w + 40
+        badge_h = 40
+        badge_x = padding + title_w + 28
+        badge_y = 73
+        if badge_x + badge_w > width - padding - 360:
+            badge_x = padding
+            badge_y = 124
+        self._draw_liquid_glass_capsule(
+            image,
+            (
+                badge_x,
+                badge_y,
+                badge_x + badge_w,
+                badge_y + badge_h,
+            ),
+            badge_h // 2,
+            theme,
+        )
+        dot_color = theme.get("time_badge_dot", self._status_colors("ok", theme)["fg"])
+        dot_y = badge_y + badge_h // 2
+        draw.ellipse((badge_x + 15, dot_y - 5, badge_x + 25, dot_y + 5), fill=dot_color)
         draw.text(
-            (padding, 58),
-            str(report.get("title") or "模型连通性"),
-            font=fonts["title"],
-            fill=theme["text"],
+            (badge_x + 34, badge_y + 8),
+            time_text,
+            font=fonts["time"],
+            fill=theme.get("time_badge_text", theme["text"]),
         )
 
-        pill_y = 190
+        pill_y = 176
         pill_x = padding
         pill_x = self._draw_pill(draw, pill_x, pill_y, f"{report.get('ok_count', 0)} 正常", fonts["small"], "ok", theme)
         pill_x = self._draw_pill(draw, pill_x + 8, pill_y, f"{report.get('slow_count', 0)} 较慢", fonts["small"], "slow", theme)
@@ -690,27 +850,205 @@ with sync_playwright() as p:
         self._draw_pill(
             draw,
             right_x + 150,
-            118,
+            112,
             str(report.get("overall_status") or "OPERATIONAL"),
             fonts["small"],
             "ok" if report.get("overall_status") == "OPERATIONAL" else "error",
             theme,
         )
         meta = (
-            f"更新于 {report.get('generated_at')} · 耗时 {report.get('elapsed_ms')} ms\n"
             f"全局并发 {report.get('global_concurrency')} · "
             f"单 Provider {report.get('provider_concurrency')} · "
             f"统计 {report.get('stats_window_days')} 天 · "
             f"历史 {report.get('history_size')} 次"
         )
         draw.multiline_text(
-            (right_x, 166),
+            (right_x, 154),
             meta,
             font=fonts["small"],
             fill=theme["muted"],
             spacing=6,
             align="right",
         )
+
+    def _draw_liquid_glass_capsule(
+        self,
+        image: Any,
+        box: tuple[int, int, int, int],
+        radius: int,
+        theme: dict[str, Any],
+    ) -> None:
+        try:
+            from PIL import Image, ImageDraw, ImageFilter
+        except Exception:
+            draw = ImageDraw.Draw(image)
+            draw.rounded_rectangle(
+                box,
+                radius=radius,
+                fill=theme.get("time_badge_bg", theme["mark_bg"]),
+                outline=theme.get("time_badge_outline", theme["outline"]),
+                width=1,
+            )
+            return
+
+        x1, y1, x2, y2 = [int(v) for v in box]
+        pad = 12
+        source = image.convert("RGBA")
+        sx1 = max(0, x1 - pad)
+        sy1 = max(0, y1 - pad)
+        sx2 = min(image.width, x2 + pad)
+        sy2 = min(image.height, y2 + pad)
+
+        blurred = source.crop((sx1, sy1, sx2, sy2)).filter(ImageFilter.GaussianBlur(5))
+        mask = Image.new("L", (sx2 - sx1, sy2 - sy1), 0)
+        mask_draw = ImageDraw.Draw(mask)
+        mask_draw.rounded_rectangle(
+            (x1 - sx1, y1 - sy1, x2 - sx1, y2 - sy1),
+            radius=radius,
+            fill=210,
+        )
+        source.paste(blurred, (sx1, sy1), mask)
+
+        dark = theme.get("name") != "light"
+        shadow = Image.new("RGBA", source.size, (0, 0, 0, 0))
+        shadow_draw = ImageDraw.Draw(shadow, "RGBA")
+        shadow_draw.rounded_rectangle(
+            (x1 - 1, y1 + 3, x2 + 1, y2 + 5),
+            radius=radius + 1,
+            fill=(0, 0, 0, 68 if dark else 36),
+        )
+        shadow = shadow.filter(ImageFilter.GaussianBlur(8))
+        source = Image.alpha_composite(source, shadow)
+
+        overlay = Image.new("RGBA", source.size, (0, 0, 0, 0))
+        overlay_draw = ImageDraw.Draw(overlay, "RGBA")
+        fill = (255, 255, 255, 54) if dark else (255, 255, 255, 118)
+        highlight = (255, 255, 255, 96) if dark else (255, 255, 255, 150)
+        lower_shadow = (0, 0, 0, 12) if dark else (148, 163, 184, 26)
+        outline = (176, 196, 222, 132) if dark else (148, 163, 184, 112)
+        inner_line = (255, 255, 255, 136) if dark else (255, 255, 255, 178)
+
+        overlay_draw.rounded_rectangle((x1, y1, x2, y2), radius=radius, fill=fill)
+        overlay_draw.rounded_rectangle(
+            (x1 + 1, y1 + 1, x2 - 1, y1 + max(9, (y2 - y1) // 2)),
+            radius=max(1, radius - 1),
+            fill=highlight,
+        )
+        overlay_draw.rounded_rectangle(
+            (x1 + 1, y1 + (y2 - y1) // 2, x2 - 1, y2 - 1),
+            radius=max(1, radius - 1),
+            fill=lower_shadow,
+        )
+        overlay_draw.rounded_rectangle((x1, y1, x2, y2), radius=radius, outline=outline, width=1)
+        overlay_draw.arc(
+            (x1 + 4, y1 + 3, x2 - 4, y2 + 6),
+            190,
+            350,
+            fill=inner_line,
+            width=1,
+        )
+
+        source = Image.alpha_composite(source, overlay)
+        image.paste(source.convert(image.mode))
+
+    def _draw_liquid_glass_panel(
+        self,
+        image: Any,
+        box: tuple[int, int, int, int],
+        radius: int,
+        theme: dict[str, Any],
+        *,
+        strength: str = "card",
+    ) -> None:
+        try:
+            from PIL import Image, ImageDraw, ImageFilter
+        except Exception:
+            draw = ImageDraw.Draw(image)
+            draw.rounded_rectangle(
+                box,
+                radius=radius,
+                fill=theme["card"] if strength == "card" else theme["panel"],
+                outline=theme["outline"],
+                width=1,
+            )
+            return
+
+        x1, y1, x2, y2 = [int(v) for v in box]
+        pad = 18 if strength == "card" else 12
+        source = image.convert("RGBA")
+        sx1 = max(0, x1 - pad)
+        sy1 = max(0, y1 - pad)
+        sx2 = min(image.width, x2 + pad)
+        sy2 = min(image.height, y2 + pad)
+        dark = theme.get("name") != "light"
+
+        blurred = source.crop((sx1, sy1, sx2, sy2)).filter(
+            ImageFilter.GaussianBlur(9 if strength == "card" else 6)
+        )
+        mask = Image.new("L", (sx2 - sx1, sy2 - sy1), 0)
+        mask_draw = ImageDraw.Draw(mask)
+        mask_draw.rounded_rectangle(
+            (x1 - sx1, y1 - sy1, x2 - sx1, y2 - sy1),
+            radius=radius,
+            fill=190 if strength == "card" else 170,
+        )
+        source.paste(blurred, (sx1, sy1), mask)
+
+        shadow = Image.new("RGBA", source.size, (0, 0, 0, 0))
+        shadow_draw = ImageDraw.Draw(shadow, "RGBA")
+        shadow_draw.rounded_rectangle(
+            (x1, y1 + 6, x2, y2 + 10),
+            radius=radius,
+            fill=(0, 0, 0, 74 if dark and strength == "card" else 44 if dark else 18),
+        )
+        shadow = shadow.filter(ImageFilter.GaussianBlur(14 if strength == "card" else 8))
+        source = Image.alpha_composite(source, shadow)
+
+        overlay = Image.new("RGBA", source.size, (0, 0, 0, 0))
+        overlay_draw = ImageDraw.Draw(overlay, "RGBA")
+        if dark:
+            fill_alpha = 22 if strength == "card" else 16
+            top_alpha = 54 if strength == "card" else 36
+            outline = (120, 144, 172, 96 if strength == "card" else 70)
+            inner = (255, 255, 255, 54 if strength == "card" else 34)
+            lower = (0, 0, 0, 16 if strength == "card" else 10)
+        else:
+            fill_alpha = 96 if strength == "card" else 70
+            top_alpha = 148 if strength == "card" else 116
+            outline = (203, 213, 225, 132 if strength == "card" else 108)
+            inner = (255, 255, 255, 178 if strength == "card" else 138)
+            lower = (148, 163, 184, 22 if strength == "card" else 14)
+
+        overlay_draw.rounded_rectangle(
+            (x1, y1, x2, y2),
+            radius=radius,
+            fill=(255, 255, 255, fill_alpha),
+        )
+        highlight_h = max(18, min(58, (y2 - y1) // 3))
+        overlay_draw.rounded_rectangle(
+            (x1 + 1, y1 + 1, x2 - 1, y1 + highlight_h),
+            radius=max(1, radius - 1),
+            fill=(255, 255, 255, top_alpha),
+        )
+        overlay_draw.rounded_rectangle(
+            (x1 + 1, y2 - highlight_h, x2 - 1, y2 - 1),
+            radius=max(1, radius - 1),
+            fill=lower,
+        )
+        overlay_draw.rounded_rectangle(
+            (x1, y1, x2, y2),
+            radius=radius,
+            outline=outline,
+            width=1,
+        )
+        overlay_draw.line(
+            (x1 + radius, y1 + 1, x2 - radius, y1 + 1),
+            fill=inner,
+            width=1,
+        )
+
+        source = Image.alpha_composite(source, overlay)
+        image.paste(source.convert(image.mode))
 
     def _draw_provider_card(
         self,
@@ -725,12 +1063,12 @@ with sync_playwright() as p:
         fonts: dict[str, Any],
         theme: dict[str, Any],
     ) -> None:
-        draw.rounded_rectangle(
+        self._draw_liquid_glass_panel(
+            image,
             (x, y, x + w, y + h),
-            radius=16,
-            fill=theme["card"],
-            outline=theme["outline"],
-            width=1,
+            20,
+            theme,
+            strength="card",
         )
         draw.line((x, y + 88, x + w, y + 88), fill=theme["line"], width=1)
         draw.rounded_rectangle(
@@ -781,6 +1119,7 @@ with sync_playwright() as p:
         row_y = y + 104
         for item, row_height in zip(provider["results"], model_heights):
             self._draw_model_row(
+                image,
                 draw,
                 item,
                 x + 20,
@@ -794,6 +1133,7 @@ with sync_playwright() as p:
 
     def _draw_model_row(
         self,
+        image: Any,
         draw: Any,
         item: dict[str, Any],
         x: int,
@@ -805,11 +1145,12 @@ with sync_playwright() as p:
     ) -> None:
         status = str(item.get("status_class") or item.get("status") or "ok")
         colors = self._status_colors(status, theme)
-        draw.rounded_rectangle(
+        self._draw_liquid_glass_panel(
+            image,
             (x, y, x + w, y + h),
-            radius=12,
-            fill=theme["panel"],
-            outline=theme["outline"],
+            16,
+            theme,
+            strength="row",
         )
         draw.ellipse((x + 12, y + 18, x + 20, y + 26), fill=colors["fg"])
 
@@ -895,6 +1236,181 @@ with sync_playwright() as p:
                 w - metric_padding * 2,
             )
             draw.text((x + metric_padding, y + curve_y_offset + 20), error_text, font=fonts["small"], fill=theme["error_text"])
+
+    def _draw_provider_row_group(
+        self,
+        image: Any,
+        draw: Any,
+        provider: dict[str, Any],
+        row_heights: list[int],
+        x: int,
+        y: int,
+        w: int,
+        h: int,
+        fonts: dict[str, Any],
+        theme: dict[str, Any],
+    ) -> None:
+        draw.rounded_rectangle(
+            (x, y, x + w, y + h),
+            radius=20,
+            fill=theme.get("row_card", theme["card"]),
+            outline=theme.get("row_outline", theme["line"]),
+            width=1,
+        )
+        draw.line(
+            (x + 24, y + 1, x + w - 24, y + 1),
+            fill=theme.get("glass_highlight", theme["line"]),
+            width=1,
+        )
+
+        icon_box = 42
+        icon_x = x + 18
+        icon_y = y + 16
+        draw.rounded_rectangle(
+            (icon_x, icon_y, icon_x + icon_box, icon_y + icon_box),
+            radius=12,
+            fill=theme["mark_bg"],
+            outline=theme["mark_outline"],
+        )
+        icon = self._load_provider_icon_image(
+            str(provider.get("provider_logo") or ""),
+            theme,
+            30,
+        )
+        if icon is not None:
+            paste_x = icon_x + (icon_box - icon.width) // 2
+            paste_y = icon_y + (icon_box - icon.height) // 2
+            image.paste(icon, (paste_x, paste_y), icon if icon.mode == "RGBA" else None)
+        else:
+            initial = str(provider.get("provider_name") or "A")[:1].upper()
+            initial_w = self._text_width(draw, initial, fonts["body"])
+            draw.text(
+                (icon_x + (icon_box - initial_w) // 2, icon_y + 11),
+                initial,
+                font=fonts["body"],
+                fill=theme["mark_text"],
+            )
+
+        title = self._fit_text(
+            draw,
+            str(provider.get("provider_name") or "Provider"),
+            fonts["h2"],
+            w - 270,
+        )
+        draw.text((x + 74, y + 16), title, font=fonts["h2"], fill=theme["text"])
+        subtitle = (
+            f"{provider.get('provider_type')} · "
+            f"{provider.get('provider_id')} · "
+            f"{provider.get('model_count')} models"
+        )
+        subtitle = self._fit_text(draw, subtitle, fonts["small"], w - 270)
+        draw.text((x + 74, y + 48), subtitle, font=fonts["small"], fill=theme["muted"])
+
+        self._draw_status_badge(
+            draw,
+            x + w - 86,
+            y + 26,
+            str(provider.get("status_label") or ""),
+            fonts["tiny"],
+            str(provider.get("status") or "ok"),
+            theme,
+        )
+
+        row_y = y + 88
+        for item, row_height in zip(provider.get("results", []), row_heights):
+            self._draw_model_status_row(
+                draw,
+                item,
+                x + 20,
+                row_y,
+                w - 40,
+                row_height,
+                fonts,
+                theme,
+            )
+            row_y += row_height + 10
+
+    def _draw_model_status_row(
+        self,
+        draw: Any,
+        item: dict[str, Any],
+        x: int,
+        y: int,
+        w: int,
+        h: int,
+        fonts: dict[str, Any],
+        theme: dict[str, Any],
+    ) -> None:
+        status = str(item.get("status_class") or item.get("status") or "ok")
+        colors = self._status_colors(status, theme)
+        draw.rounded_rectangle(
+            (x, y, x + w, y + h),
+            radius=15,
+            fill=theme.get("row_panel", theme["panel"]),
+            outline=theme.get("row_line", theme["line"]),
+            width=1,
+        )
+        draw.rounded_rectangle(
+            (x + 12, y + 18, x + 22, y + min(h - 18, 58)),
+            radius=6,
+            fill=colors["bg"],
+        )
+        draw.rounded_rectangle(
+            (x + 15, y + 20, x + 19, y + min(h - 20, 56)),
+            radius=4,
+            fill=colors["fg"],
+        )
+
+        name_x = x + 34
+        name_w = 310
+        metric_w = 92
+        metric_gap = 12
+        metrics_x = name_x + name_w + 20
+        history_x = metrics_x + metric_w * 3 + metric_gap * 2 + 22
+        history_w = max(120, x + w - 18 - history_x)
+
+        model_name = self._fit_text(
+            draw,
+            str(item.get("model") or ""),
+            fonts["body"],
+            name_w,
+        )
+        draw.text((name_x, y + 18), model_name, font=fonts["body"], fill=theme["text"])
+
+        metrics = [
+            ("可用性", str(item.get("availability") or "0.00%"), colors["fg"]),
+            ("当前延迟", f"{item.get('latency_ms')} ms", theme["text"]),
+            ("周成功次数", str(item.get("weekly_success_text") or "0/0"), colors["fg"]),
+        ]
+        for index, (label, value, value_color) in enumerate(metrics):
+            mx = metrics_x + index * (metric_w + metric_gap)
+            draw.text((mx, y + 13), label, font=fonts["tiny"], fill=theme["muted"])
+            value = self._fit_text(draw, value, fonts["metric"], metric_w)
+            draw.text((mx, y + 34), value, font=fonts["metric"], fill=value_color)
+
+        self._draw_history_cells(
+            draw,
+            item.get("history", []),
+            history_x,
+            y + 21,
+            history_w,
+            32,
+            theme,
+        )
+
+        if item.get("error"):
+            error_text = self._fit_text(
+                draw,
+                str(item["error"]),
+                fonts["small"],
+                w - 52,
+            )
+            draw.text(
+                (name_x, y + 72),
+                error_text,
+                font=fonts["small"],
+                fill=theme["error_text"],
+            )
 
     def _draw_provider_errors(
         self,
@@ -1068,18 +1584,181 @@ with sync_playwright() as p:
     ) -> None:
         if not history:
             return
-        gap = 3
-        count = len(history)
-        bar_width = max(3, int((w - gap * (count - 1)) / count))
+        gap = 2
+        bar_width = 6
+        bar_height = min(max(12, h), 20)
         cursor_x = x
+        cursor_y = y + max(0, (h - bar_height) // 2)
         for status in history:
             colors = self._status_colors(str(status), theme)
             draw.rounded_rectangle(
-                (cursor_x, y, cursor_x + bar_width, y + h),
-                radius=2,
+                (cursor_x, cursor_y, cursor_x + bar_width, cursor_y + bar_height),
+                radius=3,
                 fill=colors["fg"],
             )
             cursor_x += bar_width + gap
+            if cursor_x > x + w:
+                break
+
+    def _draw_history_cells(
+        self,
+        draw: Any,
+        history: list[str],
+        x: int,
+        y: int,
+        w: int,
+        h: int,
+        theme: Optional[dict[str, Any]] = None,
+    ) -> None:
+        if not history:
+            return
+        gap = 3
+        bar_w = 7
+        bar_h = min(28, h)
+        edge_inset = 1
+        max_cells = max(1, int((w + gap) / (bar_w + gap)))
+        history = self._row_history_bars(history, max_cells)
+        count = len(history)
+        has_empty = any(str(status) == "empty" for status in history)
+        total_width = bar_w * count + gap * (count - 1)
+        cursor_x = x
+        cursor_y = y + (h - bar_h) // 2
+        track_pad_x = 2 if has_empty else 0
+        track_h = min(h, bar_h + 6)
+        track_y = y + (h - track_h) // 2
+        track_fill = (theme or {}).get("history_track", (12, 15, 17))
+        track_outline = (theme or {}).get("history_track_outline", (24, 31, 38))
+        draw.rounded_rectangle(
+            (
+                x - track_pad_x,
+                track_y,
+                x + total_width + track_pad_x,
+                track_y + track_h,
+            ),
+            radius=track_h // 2,
+            fill=track_fill,
+            outline=track_outline,
+            width=1,
+        )
+        for index, status in enumerate(history):
+            status = str(status)
+            fill, outline, width = self._history_cell_style(status, theme)
+            if has_empty and count > 1 and index == 0:
+                self._draw_edge_history_bar(
+                    draw,
+                    (cursor_x + edge_inset, cursor_y, cursor_x + bar_w, cursor_y + bar_h),
+                    "left",
+                    5,
+                    fill,
+                    outline,
+                    width,
+                    track_fill,
+                )
+            elif has_empty and count > 1 and index == count - 1:
+                self._draw_edge_history_bar(
+                    draw,
+                    (cursor_x, cursor_y, cursor_x + bar_w - edge_inset, cursor_y + bar_h),
+                    "right",
+                    5,
+                    fill,
+                    outline,
+                    width,
+                    track_fill,
+                )
+            else:
+                draw.rounded_rectangle(
+                    (cursor_x, cursor_y, cursor_x + bar_w, cursor_y + bar_h),
+                    radius=4,
+                    fill=fill,
+                    outline=outline,
+                    width=width,
+                )
+            cursor_x += bar_w + gap
+
+    def _draw_edge_history_bar(
+        self,
+        draw: Any,
+        box: tuple[int, int, int, int],
+        side: str,
+        radius: int,
+        fill: tuple[int, int, int],
+        outline: tuple[int, int, int],
+        width: int,
+        track_fill: tuple[int, int, int],
+    ) -> None:
+        x1, y1, x2, y2 = box
+        radius = max(1, min(radius, (y2 - y1) // 2))
+        if side == "left":
+            draw.rounded_rectangle(
+                (x1, y1, x2 + radius, y2),
+                radius=radius,
+                fill=fill,
+                outline=outline,
+                width=width,
+            )
+            draw.rectangle((x2 + 1, y1 - 1, x2 + radius + 1, y2 + 1), fill=track_fill)
+            if width:
+                draw.line((x2, y1, x2, y2), fill=outline, width=width)
+            return
+
+        draw.rounded_rectangle(
+            (x1 - radius, y1, x2, y2),
+            radius=radius,
+            fill=fill,
+            outline=outline,
+            width=width,
+        )
+        draw.rectangle((x1 - radius - 1, y1 - 1, x1 - 1, y2 + 1), fill=track_fill)
+        if width:
+            draw.line((x1, y1, x1, y2), fill=outline, width=width)
+
+    def _row_history_bars(self, history: Any, limit: int = 64) -> list[str]:
+        if not isinstance(history, list):
+            return []
+        normalized = [str(status or "empty") for status in history]
+        if normalized and normalized[0] == "empty" and any(
+            status != "empty" for status in normalized
+        ):
+            statuses = [status for status in normalized if status != "empty"]
+            padding = ["empty"] * (len(normalized) - len(statuses))
+            normalized = list(reversed(statuses)) + padding
+        if limit <= 0:
+            return normalized
+        normalized = normalized[:limit]
+        if len(normalized) < limit:
+            normalized += ["empty"] * (limit - len(normalized))
+        return normalized
+
+    def _history_cell_style(
+        self,
+        status: str,
+        theme: Optional[dict[str, Any]] = None,
+    ) -> tuple[tuple[int, int, int], tuple[int, int, int], int]:
+        theme_name = (theme or {}).get("name", "dark")
+        if theme_name == "light":
+            if status == "ok":
+                return (35, 177, 114), (35, 177, 114), 1
+            if status == "slow":
+                return (217, 119, 6), (217, 119, 6), 1
+            if status == "error":
+                return (239, 68, 68), (239, 68, 68), 1
+            return (
+                (theme or {}).get("history_empty_fill", (244, 247, 251)),
+                (theme or {}).get("history_empty_outline", (232, 238, 246)),
+                1,
+            )
+
+        if status == "ok":
+            return (24, 215, 139), (24, 215, 139), 1
+        if status == "slow":
+            return (235, 165, 35), (235, 165, 35), 1
+        if status == "error":
+            return (255, 77, 94), (255, 77, 94), 1
+        return (
+            (theme or {}).get("history_empty_fill", (27, 30, 34)),
+            (theme or {}).get("history_empty_outline", (35, 40, 47)),
+            1,
+        )
 
     def _model_row_height(self, item: dict[str, Any]) -> int:
         h = 150
@@ -1133,6 +1812,22 @@ with sync_playwright() as p:
             return "light" if start <= current < end else "dark"
         return "light" if current >= start or current < end else "dark"
 
+    def _dashboard_layout(self) -> str:
+        style = self._cfg_str("dashboard_style", "").strip().lower()
+        if not style:
+            style = self._cfg_str("dashboard_layout", "new").strip().lower()
+        if style in (
+            "old",
+            "classic",
+            "legacy",
+            "cards",
+            "card",
+            "旧版",
+            "卡片",
+        ):
+            return "cards"
+        return "rows"
+
     def _normalize_hour(self, hour: int) -> int:
         return max(0, min(23, int(hour)))
 
@@ -1146,6 +1841,15 @@ with sync_playwright() as p:
                 "muted": (100, 116, 139),
                 "card": (255, 255, 255),
                 "panel": (248, 250, 252),
+                "row_card": (252, 254, 255),
+                "row_panel": (247, 250, 254),
+                "row_outline": (218, 228, 240),
+                "row_line": (221, 230, 241),
+                "glass_highlight": (255, 255, 255),
+                "history_empty_fill": (239, 244, 249),
+                "history_empty_outline": (231, 237, 245),
+                "history_track": (237, 242, 248),
+                "history_track_outline": (223, 232, 242),
                 "metric": (255, 255, 255),
                 "outline": (226, 232, 240),
                 "line": (226, 232, 240),
@@ -1154,6 +1858,10 @@ with sync_playwright() as p:
                 "mark_bg": (255, 255, 255),
                 "mark_outline": (226, 232, 240),
                 "mark_text": (15, 23, 42),
+                "time_badge_bg": (255, 255, 255),
+                "time_badge_outline": (203, 213, 225),
+                "time_badge_text": (30, 41, 59),
+                "time_badge_dot": (0, 153, 100),
                 "error_panel": (254, 242, 242),
                 "error_outline": (254, 205, 211),
                 "error_text": (159, 18, 57),
@@ -1168,6 +1876,15 @@ with sync_playwright() as p:
             "muted": (148, 163, 184),
             "card": (15, 17, 19),
             "panel": (20, 23, 26),
+            "row_card": (14, 16, 18),
+            "row_panel": (18, 21, 24),
+            "row_outline": (34, 45, 60),
+            "row_line": (30, 40, 54),
+            "glass_highlight": (56, 69, 86),
+            "history_empty_fill": (27, 30, 34),
+            "history_empty_outline": (35, 40, 47),
+            "history_track": (12, 15, 17),
+            "history_track_outline": (24, 31, 38),
             "metric": (15, 17, 19),
             "outline": (30, 41, 59),
             "line": (30, 41, 59),
@@ -1176,6 +1893,10 @@ with sync_playwright() as p:
             "mark_bg": (20, 25, 30),
             "mark_outline": (51, 65, 85),
             "mark_text": (248, 250, 252),
+            "time_badge_bg": (18, 21, 24),
+            "time_badge_outline": (51, 65, 85),
+            "time_badge_text": (226, 232, 240),
+            "time_badge_dot": (24, 231, 141),
             "error_panel": (60, 15, 20),
             "error_outline": (100, 25, 35),
             "error_text": (254, 163, 170),
@@ -1211,6 +1932,32 @@ with sync_playwright() as p:
                     continue
         return ImageFont.load_default()
 
+    def _load_pil_mono_font(self, ImageFont: Any, size: int, *, bold: bool = False) -> Any:
+        windir = os.environ.get("WINDIR", r"C:\Windows")
+        font_candidates = []
+        if bold:
+            font_candidates.extend(
+                [
+                    os.path.join(windir, "Fonts", "consolab.ttf"),
+                    os.path.join(windir, "Fonts", "CascadiaMono-SemiBold.ttf"),
+                    "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf",
+                ]
+            )
+        font_candidates.extend(
+            [
+                os.path.join(windir, "Fonts", "consola.ttf"),
+                os.path.join(windir, "Fonts", "CascadiaMono.ttf"),
+                "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+            ]
+        )
+        for path in font_candidates:
+            if os.path.exists(path):
+                try:
+                    return ImageFont.truetype(path, size=size)
+                except Exception:
+                    continue
+        return self._load_pil_font(ImageFont, size, bold=bold)
+
     def _text_width(self, draw: Any, text: str, font: Any) -> int:
         bbox = draw.textbbox((0, 0), text, font=font)
         return int(bbox[2] - bbox[0])
@@ -1236,7 +1983,7 @@ with sync_playwright() as p:
                 f"错误 {report.get('error_count', 0)} / "
                 f"总计 {report.get('total', 0)}"
             ),
-            f"更新于 {report.get('generated_at')}，耗时 {report.get('elapsed_ms')} ms",
+            f"更新于 {report.get('generated_at')}",
             "",
         ]
         for provider in report.get("providers", []):
@@ -1795,6 +2542,7 @@ with sync_playwright() as p:
             ]
             history[history_key] = records
             result["history"] = self._history_bars(records, history_size)
+            result["history_rows"] = self._row_history_bars(result["history"])
             
             if show_curve:
                 latencies = self._history_latencies(records, history_size)
@@ -1886,6 +2634,7 @@ with sync_playwright() as p:
             "stats_window_days": stats_days,
             "theme": theme,
             "theme_label": "白天" if theme == "light" else "夜间",
+            "dashboard_layout": self._dashboard_layout(),
         }
 
     def _result_payload(
@@ -1936,8 +2685,9 @@ with sync_playwright() as p:
 
     def _history_bars(self, records: list[dict[str, Any]], history_size: int) -> list[str]:
         statuses = [str(item.get("status") or "unknown") for item in records[-history_size:]]
+        statuses.reverse()
         padding = ["empty"] * max(0, history_size - len(statuses))
-        return padding + statuses
+        return statuses + padding
 
     def _history_latencies(self, records: list[dict[str, Any]], history_size: int) -> list[int]:
         lats = [int(item.get("latency_ms") or 0) for item in records[-history_size:]]
@@ -2203,7 +2953,7 @@ STATUS_TEMPLATE = r"""
     body {
       margin: 0;
       width: 1500px;
-      min-height: 860px;
+      min-height: 620px;
       color: #f5f7fb;
       font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
       background: 
@@ -2223,7 +2973,7 @@ STATUS_TEMPLATE = r"""
       align-items: flex-start;
       justify-content: space-between;
       gap: 24px;
-      margin-bottom: 40px;
+      margin-bottom: 32px;
     }
 
     .eyebrow {
@@ -2249,15 +2999,68 @@ STATUS_TEMPLATE = r"""
       font-size: 16px;
     }
 
-    h1 {
+    .title-row {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 18px;
       margin: 16px 0 16px;
-      font-size: 64px;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: 54px;
       line-height: 1;
       font-weight: 900;
       letter-spacing: -1px;
       background: linear-gradient(135deg, #ffffff, #a0a5b0);
       -webkit-background-clip: text;
       -webkit-text-fill-color: transparent;
+    }
+
+    .title-time {
+      position: relative;
+      isolation: isolate;
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      margin-top: 6px;
+      padding: 10px 17px;
+      border-radius: 999px;
+      overflow: hidden;
+      border: 1px solid rgba(176, 196, 222, 0.58);
+      background:
+        linear-gradient(180deg, rgba(255, 255, 255, 0.26), rgba(255, 255, 255, 0.07) 55%, rgba(0, 0, 0, 0.04)),
+        rgba(30, 41, 59, 0.20);
+      backdrop-filter: blur(26px) saturate(170%);
+      -webkit-backdrop-filter: blur(26px) saturate(170%);
+      box-shadow:
+        0 12px 26px rgba(0, 0, 0, 0.24),
+        inset 0 1px 1px rgba(255, 255, 255, 0.36),
+        inset 0 -1px 1px rgba(0, 0, 0, 0.12);
+      color: #e2e8f0;
+      font-size: 17px;
+      font-weight: 850;
+      white-space: nowrap;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .title-time::before {
+      content: "";
+      position: absolute;
+      left: 12px;
+      right: 12px;
+      top: 2px;
+      height: 45%;
+      border-radius: 999px;
+      background: linear-gradient(180deg, rgba(255, 255, 255, 0.34), rgba(255, 255, 255, 0));
+      pointer-events: none;
+    }
+
+    .title-time .dot {
+      position: relative;
+      z-index: 1;
+      color: #18e78d;
     }
 
     .summary {
@@ -2300,8 +3103,8 @@ STATUS_TEMPLATE = r"""
       display: flex;
       flex-direction: column;
       align-items: flex-end;
-      gap: 12px;
-      padding-top: 80px;
+      gap: 10px;
+      padding-top: 64px;
       color: #7d828c;
       font-size: 13px;
       font-weight: 500;
@@ -2327,6 +3130,212 @@ STATUS_TEMPLATE = r"""
     .overall.ok .dot { color: #18e78d; box-shadow: 0 0 8px #18e78d; }
     .overall.slow .dot { color: #ffb11a; box-shadow: 0 0 8px #ffb11a; }
     .overall.error .dot { color: #ff4d5e; box-shadow: 0 0 8px #ff4d5e; }
+
+    .provider-list {
+      display: flex;
+      flex-direction: column;
+      gap: 22px;
+    }
+
+    .provider-row-card {
+      border: 1px solid rgba(255, 255, 255, 0.07);
+      border-radius: 23px;
+      background: linear-gradient(135deg, rgba(255, 255, 255, 0.062) 0%, rgba(255, 255, 255, 0.014) 100%);
+      backdrop-filter: blur(40px) saturate(180%);
+      -webkit-backdrop-filter: blur(40px) saturate(180%);
+      box-shadow: 0 16px 38px rgba(0, 0, 0, 0.18), inset 0 1px 1px rgba(255, 255, 255, 0.08);
+      overflow: hidden;
+    }
+
+    .provider-row-card::before {
+      content: "";
+      display: block;
+      height: 1px;
+      margin: 0 24px;
+      background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.18), transparent);
+    }
+
+    .provider-row-head {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      padding: 18px 20px 10px;
+    }
+
+    .provider-row-head .provider-icon {
+      width: 44px;
+      height: 44px;
+      border-radius: 14px;
+    }
+
+    .provider-row-head .provider-icon img,
+    .provider-row-head .provider-icon svg {
+      width: 22px;
+      height: 22px;
+    }
+
+    .provider-row-title {
+      min-width: 0;
+      flex: 1 1 auto;
+    }
+
+    .provider-row-title h2 {
+      margin: 0;
+      color: #f5f7fb;
+      font-size: 21px;
+      font-weight: 850;
+    }
+
+    .provider-row-title p {
+      margin: 5px 0 0;
+      color: #8b9099;
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    .row-models {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      padding: 10px 20px 20px;
+    }
+
+    .model-status-row {
+      display: grid;
+      grid-template-columns: 10px minmax(0, 310px) 300px minmax(560px, 1fr);
+      align-items: center;
+      gap: 16px;
+      min-height: 76px;
+      padding: 14px 18px 14px 12px;
+      border: 1px solid rgba(255, 255, 255, 0.065);
+      border-radius: 16px;
+      background: linear-gradient(135deg, rgba(255, 255, 255, 0.042) 0%, rgba(255, 255, 255, 0.012) 100%);
+      backdrop-filter: blur(24px);
+      -webkit-backdrop-filter: blur(24px);
+      box-shadow: inset 0 1px 1px rgba(255, 255, 255, 0.045);
+    }
+
+    .row-status-rail {
+      justify-self: center;
+      width: 6px;
+      height: 40px;
+      border-radius: 999px;
+      background: currentColor;
+      box-shadow: 0 0 12px currentColor;
+    }
+
+    .model-status-row.ok { color: #18e78d; }
+    .model-status-row.slow { color: #ffb11a; }
+    .model-status-row.error { color: #ff4d5e; }
+
+    .row-model-name {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      color: #f5f7fb;
+      font-size: 17px;
+      font-weight: 850;
+    }
+
+    .row-metrics {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 10px;
+      color: #d9dde5;
+    }
+
+    .row-metric {
+      min-width: 0;
+    }
+
+    .row-metric label {
+      display: block;
+      color: #8b9099;
+      font-size: 11px;
+      font-weight: 800;
+      margin-bottom: 5px;
+    }
+
+    .row-metric strong {
+      display: block;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      color: #ffffff;
+      font-size: 16px;
+      font-weight: 900;
+      font-family: "Cascadia Mono", Consolas, "SFMono-Regular", monospace;
+      font-variant-numeric: tabular-nums;
+      font-feature-settings: "tnum" 1, "liga" 0;
+    }
+
+    .row-history {
+      position: relative;
+      display: flex;
+      justify-content: flex-start;
+      align-items: center;
+      gap: 3px;
+      width: max-content;
+      max-width: 100%;
+      min-width: 0;
+    }
+
+    .row-history::before {
+      content: "";
+      position: absolute;
+      left: -2px;
+      right: -2px;
+      top: 50%;
+      height: 34px;
+      transform: translateY(-50%);
+      border-radius: 999px;
+      border: 1px solid rgba(255, 255, 255, 0.055);
+      background: rgba(255, 255, 255, 0.025);
+      box-shadow: inset 0 1px 1px rgba(255, 255, 255, 0.04);
+    }
+
+    .row-history.filled::before {
+      left: 0;
+      right: 0;
+    }
+
+    .history-cell {
+      position: relative;
+      z-index: 1;
+      flex: 0 0 7px;
+      width: 7px;
+      height: 28px;
+      border-radius: 4px;
+      background: rgba(255, 255, 255, 0.035);
+      box-shadow: inset 0 1px 1px rgba(255, 255, 255, 0.13);
+    }
+
+    .history-cell.ok { background: #18d78b; }
+    .history-cell.slow { background: #eba523; }
+    .history-cell.error { background: #ff4d5e; }
+    .history-cell.empty { background: rgba(255, 255, 255, 0.055); }
+
+    .row-history:not(.filled) .history-cell:first-child {
+      flex-basis: 6px;
+      width: 6px;
+      margin-left: 1px;
+      border-radius: 999px 3px 3px 999px;
+      clip-path: polygon(100% 0, 100% 100%, 36% 100%, 0 78%, 0 22%, 36% 0);
+    }
+
+    .row-history:not(.filled) .history-cell:last-child {
+      flex-basis: 6px;
+      width: 6px;
+      margin-right: 1px;
+      border-radius: 3px 999px 999px 3px;
+      clip-path: polygon(64% 0, 100% 22%, 100% 78%, 64% 100%, 0 100%, 0 0);
+    }
+
+    .model-status-row .error-text {
+      grid-column: 2 / -1;
+      margin: 0;
+    }
 
     .grid {
       column-count: 2;
@@ -2568,14 +3577,14 @@ STATUS_TEMPLATE = r"""
     .history {
       display: flex;
       align-items: flex-end;
-      gap: 4px;
-      height: 16px;
+      gap: 2px;
+      height: 20px;
     }
 
     .bar {
-      flex: 1 1 0;
-      min-width: 4px;
-      border-radius: 2px;
+      flex: 0 0 6px;
+      width: 6px;
+      border-radius: 3px;
       background: rgba(255, 255, 255, 0.08);
       transition: height 0.3s ease;
     }
@@ -2611,6 +3620,22 @@ STATUS_TEMPLATE = r"""
     .light h1 {
       background: linear-gradient(135deg, #111827, #4b5563);
       -webkit-background-clip: text;
+    }
+
+    .light .title-time {
+      color: #1e293b;
+      border-color: rgba(203, 213, 225, 0.78);
+      background:
+        linear-gradient(180deg, rgba(255, 255, 255, 0.92), rgba(255, 255, 255, 0.56) 55%, rgba(226, 232, 240, 0.32)),
+        rgba(255, 255, 255, 0.46);
+      box-shadow:
+        0 12px 26px rgba(15, 23, 42, 0.08),
+        inset 0 1px 1px rgba(255, 255, 255, 0.95),
+        inset 0 -1px 1px rgba(148, 163, 184, 0.18);
+    }
+
+    .light .title-time .dot {
+      color: #059669;
     }
 
     .light .provider-card {
@@ -2659,6 +3684,40 @@ STATUS_TEMPLATE = r"""
     .light .overall.slow .dot { color: #d97706; box-shadow: 0 0 8px rgba(217, 119, 6, 0.5); }
     .light .overall.error .dot { color: #e11d48; box-shadow: 0 0 8px rgba(225, 29, 72, 0.5); }
 
+    .light .provider-row-card {
+      background: linear-gradient(135deg, rgba(255, 255, 255, 0.58) 0%, rgba(255, 255, 255, 0.24) 100%);
+      border-color: rgba(210, 224, 240, 0.72);
+      box-shadow: 0 16px 38px rgba(15, 23, 42, 0.04), inset 0 1px 1px rgba(255, 255, 255, 0.84);
+    }
+
+    .light .provider-row-title h2,
+    .light .row-model-name,
+    .light .row-metric strong {
+      color: #111827;
+    }
+
+    .light .provider-row-title p,
+    .light .row-metric label {
+      color: #64748b;
+    }
+
+    .light .model-status-row {
+      background: linear-gradient(135deg, rgba(248, 251, 255, 0.70) 0%, rgba(248, 251, 255, 0.42) 100%);
+      border-color: rgba(215, 226, 239, 0.86);
+      box-shadow: inset 0 1px 1px rgba(255, 255, 255, 0.86);
+    }
+
+    .light .row-history::before {
+      border-color: rgba(223, 232, 242, 0.9);
+      background: rgba(237, 242, 248, 0.82);
+      box-shadow: inset 0 1px 1px rgba(255, 255, 255, 0.78);
+    }
+
+    .light .history-cell.ok { background: #23b172; }
+    .light .history-cell.slow { background: #d97706; }
+    .light .history-cell.error { background: #ef4444; }
+    .light .history-cell.empty { background: #eef3f8; }
+
     .light .model-row {
       background: linear-gradient(135deg, rgba(255, 255, 255, 0.6) 0%, rgba(255, 255, 255, 0.3) 100%);
       border-color: rgba(255, 255, 255, 0.8);
@@ -2696,7 +3755,10 @@ STATUS_TEMPLATE = r"""
   <main class="page">
     <section class="topline">
       <div>
-        <h1>{{ title }}</h1>
+        <div class="title-row">
+          <h1>{{ title }}</h1>
+          <div class="title-time"><span class="dot"></span>更新于 {{ generated_at }}</div>
+        </div>
         <div class="summary">
           <span class="pill ok"><span class="dot"></span>{{ ok_count }} 正常</span>
           <span class="pill slow"><span class="dot"></span>{{ slow_count }} 较慢</span>
@@ -2707,90 +3769,145 @@ STATUS_TEMPLATE = r"""
       </div>
       <div class="right-meta">
         <div class="overall {{ overall_class }}"><span class="dot"></span>{{ overall_status }}</div>
-        <div>更新于 {{ generated_at }} · 耗时 {{ elapsed_ms }} ms</div>
         <div>全局并发 {{ global_concurrency }} · 单 Provider {{ provider_concurrency }} · 统计 {{ stats_window_days }} 天 · 历史 {{ history_size }} 次</div>
       </div>
     </section>
 
-    <section class="grid">
-      {% for provider in providers %}
-      <article class="provider-card">
-        <header class="provider-head">
-          <div class="provider-icon">
-            {% if provider.provider_logo and provider.provider_logo.startswith('http') %}
-              <img src="{{ provider.provider_logo }}" alt="logo" style="width:24px; height:24px; object-fit:contain;" />
-            {% elif provider.provider_logo and '<svg' in provider.provider_logo %}
-              {{ provider.provider_logo | safe }}
-            {% else %}
-              {{ provider.provider_name[:1] | upper }}
-            {% endif %}
-          </div>
-          <div class="provider-info">
-            <h2>{{ provider.provider_name }}</h2>
-            <p>{{ provider.provider_type }} · {{ provider.provider_id }} · {{ provider.model_count }} models</p>
-          </div>
-          <div class="provider-status {{ provider.status }}">{{ provider.status_label }}</div>
-        </header>
-
-        <div class="models">
-          {% for item in provider.results %}
-          <div class="model-row">
-            <div class="model-top">
-              <div class="model-name">
-                <span class="model-dot {{ item.status_class }}"></span>
-                <span>{{ item.model }}</span>
-              </div>
-              <div class="status-badge {{ item.status_class }}">{{ item.status_label }}</div>
+    {% if dashboard_layout == 'cards' %}
+      <section class="grid">
+        {% for provider in providers %}
+        <article class="provider-card">
+          <header class="provider-head">
+            <div class="provider-icon">
+              {% if provider.provider_logo and provider.provider_logo.startswith('http') %}
+                <img src="{{ provider.provider_logo }}" alt="logo" style="width:24px; height:24px; object-fit:contain;" />
+              {% elif provider.provider_logo and '<svg' in provider.provider_logo %}
+                {{ provider.provider_logo | safe }}
+              {% else %}
+                {{ provider.provider_name[:1] | upper }}
+              {% endif %}
             </div>
-
-            <div class="metric-grid">
-              <div class="metric">
-                <label>当前延迟</label>
-                <strong>{{ item.latency_ms }} ms</strong>
-              </div>
-              <div class="metric">
-                <label>24h平均</label>
-                <strong>{{ item.avg_latency_24h }}</strong>
-              </div>
-              <div class="metric">
-                <label>可用性</label>
-                <strong class="availability {{ item.status_class }}">{{ item.availability }}</strong>
-              </div>
-              <div class="metric">
-                <label>周成功次数</label>
-                <strong class="availability {{ item.status_class }}">{{ item.weekly_success_text }}</strong>
-              </div>
+            <div class="provider-info">
+              <h2>{{ provider.provider_name }}</h2>
+              <p>{{ provider.provider_type }} · {{ provider.provider_id }} · {{ provider.model_count }} models</p>
             </div>
+            <div class="provider-status {{ provider.status }}">{{ provider.status_label }}</div>
+          </header>
 
-            {% if item.show_curve_chart %}
-            <div class="curve-container">
-              <svg class="curve-chart" viewBox="0 0 100 40" preserveAspectRatio="none">
-                <path d="{{ item.svg_path_area }}" class="area" />
-                <path d="{{ item.svg_path_line }}" class="line" />
-              </svg>
-              <div class="time-axis">
-                {% for label in item.time_labels %}
-                <span style="{{ label.style }}">{{ label.text }}</span>
+          <div class="models">
+            {% for item in provider.results %}
+            <div class="model-row">
+              <div class="model-top">
+                <div class="model-name">
+                  <span class="model-dot {{ item.status_class }}"></span>
+                  <span>{{ item.model }}</span>
+                </div>
+                <div class="status-badge {{ item.status_class }}">{{ item.status_label }}</div>
+              </div>
+
+              <div class="metric-grid">
+                <div class="metric">
+                  <label>当前延迟</label>
+                  <strong>{{ item.latency_ms }} ms</strong>
+                </div>
+                <div class="metric">
+                  <label>24h平均</label>
+                  <strong>{{ item.avg_latency_24h }}</strong>
+                </div>
+                <div class="metric">
+                  <label>可用性</label>
+                  <strong class="availability {{ item.status_class }}">{{ item.availability }}</strong>
+                </div>
+                <div class="metric">
+                  <label>周成功次数</label>
+                  <strong class="availability {{ item.status_class }}">{{ item.weekly_success_text }}</strong>
+                </div>
+              </div>
+
+              {% if item.show_curve_chart %}
+              <div class="curve-container">
+                <svg class="curve-chart" viewBox="0 0 100 40" preserveAspectRatio="none">
+                  <path d="{{ item.svg_path_area }}" class="area" />
+                  <path d="{{ item.svg_path_line }}" class="line" />
+                </svg>
+                <div class="time-axis">
+                  {% for label in item.time_labels %}
+                  <span style="{{ label.style }}">{{ label.text }}</span>
+                  {% endfor %}
+                </div>
+              </div>
+              {% endif %}
+
+              <div class="history" title="最近 {{ history_size }} 次检测">
+                {% for status in item.history %}
+                <span class="bar {{ status }}"></span>
                 {% endfor %}
               </div>
-            </div>
-            {% endif %}
 
-            <div class="history" title="最近 {{ history_size }} 次检测">
-              {% for status in item.history %}
-              <span class="bar {{ status }}"></span>
-              {% endfor %}
+              {% if item.error %}
+              <div class="error-text">{{ item.error }}</div>
+              {% endif %}
             </div>
-
-            {% if item.error %}
-            <div class="error-text">{{ item.error }}</div>
-            {% endif %}
+            {% endfor %}
           </div>
-          {% endfor %}
-        </div>
-      </article>
-      {% endfor %}
-    </section>
+        </article>
+        {% endfor %}
+      </section>
+    {% else %}
+      <section class="provider-list">
+        {% for provider in providers %}
+        <article class="provider-row-card">
+          <header class="provider-row-head">
+            <div class="provider-icon">
+              {% if provider.provider_logo and provider.provider_logo.startswith('http') %}
+                <img src="{{ provider.provider_logo }}" alt="logo" style="width:22px; height:22px; object-fit:contain;" />
+              {% elif provider.provider_logo and '<svg' in provider.provider_logo %}
+                {{ provider.provider_logo | safe }}
+              {% else %}
+                {{ provider.provider_name[:1] | upper }}
+              {% endif %}
+            </div>
+            <div class="provider-row-title">
+              <h2>{{ provider.provider_name }}</h2>
+              <p>{{ provider.provider_type }} · {{ provider.provider_id }} · {{ provider.model_count }} models</p>
+            </div>
+            <div class="provider-status {{ provider.status }}">{{ provider.status_label }}</div>
+          </header>
+
+          <div class="row-models">
+            {% for item in provider.results %}
+            <div class="model-status-row {{ item.status_class }}">
+              <span class="row-status-rail"></span>
+              <div class="row-model-name">{{ item.model }}</div>
+              <div class="row-metrics">
+                <div class="row-metric">
+                  <label>可用性</label>
+                  <strong class="availability {{ item.status_class }}">{{ item.availability }}</strong>
+                </div>
+                <div class="row-metric">
+                  <label>当前延迟</label>
+                  <strong>{{ item.latency_ms }} ms</strong>
+                </div>
+                <div class="row-metric">
+                  <label>周成功次数</label>
+                  <strong class="availability {{ item.status_class }}">{{ item.weekly_success_text }}</strong>
+                </div>
+              </div>
+              <div class="row-history{% if 'empty' not in item.history_rows %} filled{% endif %}" title="最近 {{ item.history_rows | length }} 次检测">
+                {% for status in item.history_rows %}
+                <span class="history-cell {{ status }}"></span>
+                {% endfor %}
+              </div>
+              {% if item.error %}
+              <div class="error-text">{{ item.error }}</div>
+              {% endif %}
+            </div>
+            {% endfor %}
+          </div>
+        </article>
+        {% endfor %}
+      </section>
+    {% endif %}
 
     {% if provider_errors %}
     <section class="provider-errors">
