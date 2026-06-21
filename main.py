@@ -20,6 +20,7 @@ from astrbot.api.star import Context, Star, register
 
 
 PLUGIN_NAME = "astrbot_plugin_model_connectivity"
+HISTORY_DISPLAY_SIZE = 64
 
 
 @dataclass
@@ -79,7 +80,7 @@ PROVIDER_ICONS = {
     PLUGIN_NAME,
     "Codex",
     "检测 WebUI 已打开的模型连通性，并发送状态看板图片。",
-    "1.4.2",
+    "1.5.0",
 )
 class ModelConnectivityPlugin(Star):
     def __init__(self, context: Context, config: Optional[dict] = None):
@@ -2505,7 +2506,7 @@ with sync_playwright() as p:
         provider_errors: list[dict[str, Any]],
         started_at: float,
     ) -> dict[str, Any]:
-        history_size = max(1, self._cfg_int("history_size", 30))
+        history_size = HISTORY_DISPLAY_SIZE
         stats_days = max(1, self._cfg_int("stats_window_days", 7))
         show_error_detail = self._cfg_bool("show_error_detail", True)
         now = datetime.now()
@@ -2514,7 +2515,7 @@ with sync_playwright() as p:
 
         for result in results:
             history_key = result["history_key"]
-            history_size = self._cfg_int("history_size", 30)
+            history_size = HISTORY_DISPLAY_SIZE
             show_curve = self._cfg_bool("show_curve_chart", True)
             interval_str = self._auto_check_interval_label()
             
@@ -3276,7 +3277,7 @@ STATUS_TEMPLATE = r"""
       justify-content: flex-start;
       align-items: center;
       gap: 3px;
-      width: max-content;
+      width: 100%;
       max-width: 100%;
       min-width: 0;
     }
@@ -3303,8 +3304,8 @@ STATUS_TEMPLATE = r"""
     .history-cell {
       position: relative;
       z-index: 1;
-      flex: 0 0 7px;
-      width: 7px;
+      flex: 1 1 0;
+      min-width: 4px;
       height: 28px;
       border-radius: 4px;
       background: rgba(255, 255, 255, 0.035);

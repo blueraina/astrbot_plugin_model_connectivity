@@ -155,12 +155,6 @@
     "default": 7,
     "hint": "用于统计成功次数/总测试次数和可用性的时间窗口，默认一周。"
   },
-  "history_size": {
-    "description": "历史条长度",
-    "type": "int",
-    "default": 30,
-    "hint": "每个模型保留最近多少次检测结果。"
-  },
   "max_history_records": {
     "description": "每个模型最多保留历史记录数",
     "type": "int",
