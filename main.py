@@ -80,7 +80,7 @@ PROVIDER_ICONS = {
     PLUGIN_NAME,
     "Codex",
     "检测 WebUI 已打开的模型连通性，并发送状态看板图片。",
-    "1.5.0",
+    "1.5.1",
 )
 class ModelConnectivityPlugin(Star):
     def __init__(self, context: Context, config: Optional[dict] = None):
