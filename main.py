@@ -392,6 +392,7 @@ class ModelConnectivityPlugin(Star):
                 continue
             for item in provider.get("results", []) or []:
                 if isinstance(item, dict):
+                    item["history"] = self._history_statuses(item.get("history", []))
                     item["history_rows"] = self._row_history_bars(item.get("history", []))
         return snapshot
 
@@ -861,7 +862,7 @@ with sync_playwright() as p:
             f"全局并发 {report.get('global_concurrency')} · "
             f"单 Provider {report.get('provider_concurrency')} · "
             f"统计 {report.get('stats_window_days')} 天 · "
-            f"历史 {report.get('history_size')} 次"
+            f"历史最多 {report.get('history_size')} 次"
         )
         draw.multiline_text(
             (right_x, 154),
@@ -1614,26 +1615,25 @@ with sync_playwright() as p:
         if not history:
             return
         gap = 3
-        bar_w = 7
         bar_h = min(28, h)
-        edge_inset = 1
-        max_cells = max(1, int((w + gap) / (bar_w + gap)))
+        max_cells = max(1, int((w + gap) / (7 + gap)))
         history = self._row_history_bars(history, max_cells)
         count = len(history)
-        has_empty = any(str(status) == "empty" for status in history)
-        total_width = bar_w * count + gap * (count - 1)
+        if count <= 0:
+            return
+        total_gap = gap * (count - 1)
+        bar_w = max(4.0, (w - total_gap) / count)
         cursor_x = x
         cursor_y = y + (h - bar_h) // 2
-        track_pad_x = 2 if has_empty else 0
         track_h = min(h, bar_h + 6)
         track_y = y + (h - track_h) // 2
         track_fill = (theme or {}).get("history_track", (12, 15, 17))
         track_outline = (theme or {}).get("history_track_outline", (24, 31, 38))
         draw.rounded_rectangle(
             (
-                x - track_pad_x,
+                x,
                 track_y,
-                x + total_width + track_pad_x,
+                x + w,
                 track_y + track_h,
             ),
             radius=track_h // 2,
@@ -1644,36 +1644,14 @@ with sync_playwright() as p:
         for index, status in enumerate(history):
             status = str(status)
             fill, outline, width = self._history_cell_style(status, theme)
-            if has_empty and count > 1 and index == 0:
-                self._draw_edge_history_bar(
-                    draw,
-                    (cursor_x + edge_inset, cursor_y, cursor_x + bar_w, cursor_y + bar_h),
-                    "left",
-                    5,
-                    fill,
-                    outline,
-                    width,
-                    track_fill,
-                )
-            elif has_empty and count > 1 and index == count - 1:
-                self._draw_edge_history_bar(
-                    draw,
-                    (cursor_x, cursor_y, cursor_x + bar_w - edge_inset, cursor_y + bar_h),
-                    "right",
-                    5,
-                    fill,
-                    outline,
-                    width,
-                    track_fill,
-                )
-            else:
-                draw.rounded_rectangle(
-                    (cursor_x, cursor_y, cursor_x + bar_w, cursor_y + bar_h),
-                    radius=4,
-                    fill=fill,
-                    outline=outline,
-                    width=width,
-                )
+            right = x + w if index == count - 1 else cursor_x + bar_w
+            draw.rounded_rectangle(
+                (cursor_x, cursor_y, right, cursor_y + bar_h),
+                radius=4,
+                fill=fill,
+                outline=outline,
+                width=width,
+            )
             cursor_x += bar_w + gap
 
     def _draw_edge_history_bar(
@@ -1716,19 +1694,15 @@ with sync_playwright() as p:
     def _row_history_bars(self, history: Any, limit: int = 64) -> list[str]:
         if not isinstance(history, list):
             return []
-        normalized = [str(status or "empty") for status in history]
-        if normalized and normalized[0] == "empty" and any(
-            status != "empty" for status in normalized
-        ):
-            statuses = [status for status in normalized if status != "empty"]
-            padding = ["empty"] * (len(normalized) - len(statuses))
-            normalized = list(reversed(statuses)) + padding
+        normalized = self._history_statuses(history)
         if limit <= 0:
             return normalized
-        normalized = normalized[:limit]
-        if len(normalized) < limit:
-            normalized += ["empty"] * (limit - len(normalized))
-        return normalized
+        return normalized[:limit]
+
+    def _history_statuses(self, history: Any) -> list[str]:
+        if not isinstance(history, list):
+            return []
+        return [str(status or "unknown") for status in history if str(status or "empty") != "empty"]
 
     def _history_cell_style(
         self,
@@ -2527,8 +2501,6 @@ with sync_playwright() as p:
                 records = []
             records = self._prune_history_records(
                 records,
-                now,
-                stats_days,
                 history_size,
             )
             records.append(
@@ -2687,13 +2659,10 @@ with sync_playwright() as p:
     def _history_bars(self, records: list[dict[str, Any]], history_size: int) -> list[str]:
         statuses = [str(item.get("status") or "unknown") for item in records[-history_size:]]
         statuses.reverse()
-        padding = ["empty"] * max(0, history_size - len(statuses))
-        return statuses + padding
+        return statuses
 
     def _history_latencies(self, records: list[dict[str, Any]], history_size: int) -> list[int]:
-        lats = [int(item.get("latency_ms") or 0) for item in records[-history_size:]]
-        padding = [0] * max(0, history_size - len(lats))
-        return padding + lats
+        return [int(item.get("latency_ms") or 0) for item in records[-history_size:]]
 
     def _generate_svg_path(self, latencies: list[int], width: int, height: int) -> str:
         if not latencies:
@@ -2749,11 +2718,10 @@ with sync_playwright() as p:
 
     def _history_time_labels(self, records: list[dict[str, Any]], history_size: int) -> list[dict[str, Any]]:
         actual_records = records[-history_size:]
-        n = max(history_size, len(actual_records))
+        n = len(actual_records)
         if n <= 1 or not actual_records:
             return []
             
-        pad_len = history_size - len(actual_records)
         labels = []
         num_labels = 4 if len(actual_records) >= 4 else len(actual_records)
         if num_labels <= 1:
@@ -2766,7 +2734,7 @@ with sync_playwright() as p:
             checked_at = self._parse_checked_at(rec.get("checked_at"))
             if not checked_at:
                 continue
-            x_pct = (pad_len + i) / (n - 1) * 100
+            x_pct = i / (n - 1) * 100
             if x_pct - last_pct < 15:
                 continue
             last_pct = x_pct
@@ -2788,18 +2756,10 @@ with sync_playwright() as p:
     def _prune_history_records(
         self,
         records: list[dict[str, Any]],
-        now: datetime,
-        stats_days: int,
         history_size: int,
     ) -> list[dict[str, Any]]:
-        window_start = now - timedelta(days=stats_days)
         max_records = max(history_size, self._cfg_int("max_history_records", 500))
-        kept: list[dict[str, Any]] = []
-        for record in records:
-            checked_at = self._parse_checked_at(record.get("checked_at"))
-            if checked_at is None or checked_at >= window_start:
-                kept.append(record)
-        return kept[-max_records:]
+        return records[-max_records:]
 
     def _records_in_days(
         self,
@@ -3770,7 +3730,7 @@ STATUS_TEMPLATE = r"""
       </div>
       <div class="right-meta">
         <div class="overall {{ overall_class }}"><span class="dot"></span>{{ overall_status }}</div>
-        <div>全局并发 {{ global_concurrency }} · 单 Provider {{ provider_concurrency }} · 统计 {{ stats_window_days }} 天 · 历史 {{ history_size }} 次</div>
+        <div>全局并发 {{ global_concurrency }} · 单 Provider {{ provider_concurrency }} · 统计 {{ stats_window_days }} 天 · 历史最多 {{ history_size }} 次</div>
       </div>
     </section>
 
@@ -3839,7 +3799,7 @@ STATUS_TEMPLATE = r"""
               </div>
               {% endif %}
 
-              <div class="history" title="最近 {{ history_size }} 次检测">
+              <div class="history" title="最近最多 {{ history_size }} 次检测">
                 {% for status in item.history %}
                 <span class="bar {{ status }}"></span>
                 {% endfor %}
